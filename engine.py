@@ -27,7 +27,7 @@ import uuid
 
 from xml_utils import atomic_bytes, inspect_xml, plain_text, save_fulltext
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 AGENT = f"JournalXMLDownloader/{VERSION} (personal research)"
 FULLTEXT = {"fulltext_structured", "fulltext_rawtext"}
 NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)

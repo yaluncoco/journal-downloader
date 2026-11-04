@@ -105,3 +105,9 @@ EXE 输出到 `release/JournalDownloader.exe`。XML 下载引擎使用 Python �
 | `smoke_test.py` | 打包程序自检 |
 
 仓库不包含 API Key、用户配置或下载的论文全文。运行产生的文库、日志和构建产物已加入忽略规则。
+
+## 图标
+
+EXE、窗口和界面使用用户指定的 [Alpine 图标](https://iconic-api.onrender.com/dark/alpine)。`app.svg` 保留原始矢量图，`app.png` 用于界面，`app.ico` 包含 16–256 像素的多种尺寸，供 Windows 使用。
+
+修改图标时，先将 SVG 渲染为至少 256 × 256 的透明 PNG，再运行 `python make_icon.py` 生成 ICO。仓库已包含这些文件，正常打包无需额外安装 SVG 渲染工具。
