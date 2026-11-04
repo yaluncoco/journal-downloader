@@ -32,3 +32,5 @@ pdf_pending.jsonl
 pdf_summary.json
 .image-cache/
 .work/
+*.dpapi
+library-data/

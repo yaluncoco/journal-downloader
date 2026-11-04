@@ -164,6 +164,8 @@ class UpdateUI:
                 self.update_message.set(f"无法启动更新：{error}")
                 self.update_action.configure(state="normal", text="关闭", command=self._close_update)
                 return
+            self._persist_api_key()
+            self._credentials_closed = True
             self.key.set("")
             self._cancel_update_notice()
             self.destroy()

@@ -38,11 +38,14 @@ class EngineTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self.state_patch = patch("library_store.STATE_HOME", self.root / "app-state")
+        self.state_patch.start()
         self.cfg = e.Config("PRIVATE_TEST_KEY", e.PRESETS[0].url, 2024, 2024, self.root, interval=0)
         self.base = self.root / e.PRESETS[0].issn
         self.row = {"doi": "10.1016/j.test.2024.123", "year": 2024, "date": "2024-01", "title": "Test"}
 
     def tearDown(self):
+        self.state_patch.stop()
         self.tmp.cleanup()
 
     def runner(self):
@@ -107,10 +110,10 @@ class EngineTests(unittest.TestCase):
         runner.run()
         self.assertEqual(calls, [row["doi"] for row in rows[1:4]])
         self.assertEqual((runner.new_count, runner.reused, len(runner.saved)), (2, 1, 3))
-        summary = e.load_json(self.base / "download_summary.json")
+        summary = e.load_json(e.state_dir(self.base) / "download_summary.json")
         self.assertEqual(summary["stage"], "limit_reached")
         self.assertEqual(summary["pending"], 2)
-        self.assertEqual(len((self.base / "manifest.jsonl").read_text().splitlines()), 5)
+        self.assertEqual(len((e.state_dir(self.base) / "manifest.jsonl").read_text().splitlines()), 5)
         self.assertIsNotNone(e.verify_saved(self.base, rows[1]))
         calls.clear()
         resumed = self.runner()
@@ -118,7 +121,7 @@ class EngineTests(unittest.TestCase):
         resumed.run()
         self.assertEqual(calls, [rows[4]["doi"]])
         self.assertEqual((resumed.new_count, resumed.reused), (1, 3))
-        self.assertEqual(e.load_json(self.base / "download_summary.json")["stage"], "finished_with_pending")
+        self.assertEqual(e.load_json(e.state_dir(self.base) / "download_summary.json")["stage"], "finished_with_pending")
 
     def test_limit_finishes_before_quota_wait(self):
         rows = [self.row, {**self.row, "doi": "10.1016/j.test.2024.second"}]
@@ -130,7 +133,7 @@ class EngineTests(unittest.TestCase):
         runner.fetch = lambda doi: (xml(doi), {"http": 200, "remaining": "0", "quota_reset_epoch": str(deadline)})
         runner.run()
         self.assertEqual(runner.new_count, 1)
-        self.assertEqual(e.load_json(self.base / "server_pause.json")["deadline"], deadline)
+        self.assertEqual(e.load_json(e.state_dir(self.base) / "server_pause.json")["deadline"], deadline)
 
     def test_limit_leaves_deferred_network_failures_for_next_run(self):
         rows = [{**self.row, "doi": f"10.1016/j.test.2024.net{i}"} for i in range(3)]
@@ -163,7 +166,7 @@ class EngineTests(unittest.TestCase):
                 runner.fetch = lambda doi: (xml(doi), {"http": 200})
                 runner.run()
                 self.assertEqual(runner.new_count, 3)
-                self.assertEqual(e.load_json(runner.base / "download_summary.json")["stage"], "complete")
+                self.assertEqual(e.load_json(runner.state / "download_summary.json")["stage"], "complete")
 
     def test_custom_journal_exact_resolution(self):
         self.cfg.url = "https://www.sciencedirect.com/journal/agricultural-and-forest-meteorology"
@@ -200,7 +203,7 @@ class EngineTests(unittest.TestCase):
         target, _, _ = e.paths_for(self.base, self.row)
         e.atomic_bytes(target, xml(self.row["doi"]))
         self.assertIsNotNone(e.verify_saved(self.base, self.row))
-        self.assertTrue(target.with_suffix(".xml.sha256").exists())
+        self.assertTrue(e.sidecar_path(target).exists())
         self.assertIsNotNone(e.verify_saved(self.base, {**self.row, "year": 2025}))
 
     def test_legacy_folder_recognition(self):
@@ -211,7 +214,7 @@ class EngineTests(unittest.TestCase):
     def test_legacy_index_reuse_without_network(self):
         e.save_json(self.base / "index_summary.json", {"issn": "0034-4257", "requested_years": [2024, 2027],
                     "records": 1, "queries": [{"exhausted": True}]})
-        e.save_lines(self.base / "manifest.jsonl", [self.row])
+        e.save_lines(e.state_dir(self.base) / "manifest.jsonl", [self.row])
         r = self.runner()
         r.base, r.journal = self.base, e.PRESETS[0]
         r.public_json = lambda url: self.fail("Complete legacy index must work offline")
@@ -359,7 +362,7 @@ class EngineTests(unittest.TestCase):
         r.public_json = lambda url: {"message": next(pages)}
         records = r.collect()
         self.assertEqual(len(records), 1)
-        self.assertTrue(e.load_json(self.base / "indexes" / "2024-2024.json")["complete"])
+        self.assertTrue(e.load_json(e.state_dir(self.base) / "indexes" / "2024-2024.json")["complete"])
 
     def test_index_bad_pagination_not_persisted(self):
         r = self.runner()
@@ -368,7 +371,7 @@ class EngineTests(unittest.TestCase):
         r.public_json = lambda url: {"message": {"items": [item], "total-results": 2, "next-cursor": "same"}}
         with self.assertRaises(e.ActionRequired):
             r.collect()
-        self.assertFalse((self.base / "indexes" / "2024-2024.json").exists())
+        self.assertFalse((e.state_dir(self.base) / "indexes" / "2024-2024.json").exists())
 
     def test_cancelled_scan_keeps_existing_xml(self):
         cached_index(self.base, [self.row])

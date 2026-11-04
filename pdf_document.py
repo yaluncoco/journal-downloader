@@ -77,6 +77,14 @@ class Article:
         self.floats = {n.get("id"): n for n in floats} if floats is not None else {}
         self.placed = set()
         self.images = {}
+        self.inline_heights = {}
+        for node in self.root.iter():
+            if local(node) == "object" and node.get("type") == "IMAGE-DOWNSAMPLED":
+                height = node.get("height", "")
+                if height.isdecimal() and 1 <= int(height) <= 10000:
+                    # The standard image is a text-scale rendition. High-resolution
+                    # bytes improve sharpness but must never determine printed size.
+                    self.inline_heights[node.get("ref", "")] = min(6, max(.5, int(height) / 12))
 
     def required_images(self):
         refs = set()
@@ -120,7 +128,8 @@ class Article:
             path = self.images.get(ref)
             if not path:
                 raise ValueError(f"图片 {ref} 缺失，无法生成完整 PDF。")
-            result.append(f'<img class="{"inline-image" if inline else "figure-image"}" src="{esc(path.resolve().as_uri())}" alt="{esc(ref)}">')
+            size = f' style="height:{self.inline_heights.get(ref, .95):.4f}em"' if inline else ""
+            result.append(f'<img class="{"inline-image" if inline else "figure-image"}"{size} src="{esc(path.resolve().as_uri())}" alt="{esc(ref)}">')
         return "".join(result)
 
     def table(self, node):
@@ -358,11 +367,15 @@ figure { margin: 11pt 0 12pt; break-inside: avoid; text-align: center; }
 .figure-image { display: block; max-width: 100%; max-height: 162mm; width: auto; height: auto; margin: 0 auto 5pt; }
 figcaption, .caption { text-align: justify; font: 8.5pt/1.2 "Times New Roman"; }
 figcaption p, .caption p { text-indent: 0; display: inline; }
-.inline-image { max-width: 100%; max-height: 12mm; vertical-align: middle; }
+.inline-image { display: inline-block; width: auto; height: .95em; max-width: 100%; object-fit: contain; object-position: left bottom; vertical-align: baseline; }
 .table-block { margin: 11pt 0 12pt; }
 .caption { margin-bottom: 5pt; break-after: avoid; }
 table { width: 100%; border-collapse: collapse; table-layout: fixed; font: 8pt/1.18 "Times New Roman"; border-top: .7pt solid #333; border-bottom: .7pt solid #333; }
-thead { display: table-header-group; border-bottom: .5pt solid #555; }
+thead { display: table-header-group; border-bottom: .5pt solid #555; break-inside: avoid; break-after: avoid; }
+thead tr { break-after: avoid; }
+tbody tr:first-child { break-before: avoid; }
+tbody tr:nth-last-child(2) { break-after: avoid; }
+tbody tr:last-child { break-before: avoid; }
 tr { break-inside: avoid; }
 th, td { text-align: left; vertical-align: top; padding: 4pt 3pt; overflow-wrap: anywhere; }
 th { font-weight: normal; }

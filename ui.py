@@ -22,7 +22,7 @@ FONT = "Microsoft YaHei UI"
 
 
 class App(ctk.CTk, Controller, UpdateUI):
-    def __init__(self, *, check_updates=True):
+    def __init__(self, *, check_updates=True, remember_credentials=True):
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
         super().__init__(fg_color=BG)
@@ -39,6 +39,7 @@ class App(ctk.CTk, Controller, UpdateUI):
         self.stages = ""
         self.advanced_window = None
         self.pdf_window = None
+        self.use_key_store = remember_credentials
         self.settings = load_json(SETTINGS_DIR / "settings.json", {})
         if not isinstance(self.settings, dict):
             self.settings = {}
@@ -97,10 +98,8 @@ class App(ctk.CTk, Controller, UpdateUI):
             ctk.CTkLabel(header, text="", image=self.logo, width=48).grid(row=0, column=0, rowspan=2, padx=(0, 14))
         self.label(header, "期刊全文下载器", font=ctk.CTkFont(FONT, 26, weight="bold")).grid(row=0, column=1, sticky="w")
         self.label(header, "把文献收集交给工具，把时间留给研究。", font=self.small_font, color=MUTED).grid(row=1, column=1, sticky="w", pady=(3, 0))
-        ctk.CTkLabel(header, text="XML  +  PDF", text_color=TEAL, fg_color=PALE,
-                    corner_radius=10, font=self.small_font, width=116, height=30).grid(row=0, column=2, rowspan=2)
         update_tools = ctk.CTkFrame(header, width=36, height=36, fg_color="transparent")
-        update_tools.grid(row=0, column=3, rowspan=2, padx=(8, 0))
+        update_tools.grid(row=0, column=2, rowspan=2, padx=(8, 0))
         arrow = Image.new("RGBA", (72, 72))
         draw = ImageDraw.Draw(arrow)
         draw.line([(36, 55), (36, 16)], fill=TEAL, width=7)
@@ -134,11 +133,15 @@ class App(ctk.CTk, Controller, UpdateUI):
         key_head = ctk.CTkFrame(form, fg_color="transparent")
         key_head.grid(row=1, column=0, sticky="ew", padx=24)
         self.label(key_head, "API Key", font=self.bold_font).pack(side="left")
-        self.label(key_head, "仅本次运行保留", font=self.small_font, color=MUTED).pack(side="right")
+        self.editable(ctk.CTkCheckBox(key_head, text="本机加密记住 Key", variable=self.remember_key,
+            command=self._persist_api_key, font=self.small_font, text_color=MUTED, width=150,
+            checkbox_width=16, checkbox_height=16, corner_radius=5, border_width=1,
+            border_color="#A7BBC7", fg_color=TEAL, hover_color=TEAL_HOVER)).pack(side="right")
         key_row = ctk.CTkFrame(form, fg_color="transparent")
         key_row.grid(row=2, column=0, sticky="ew", padx=24, pady=(7, 17))
         key_row.grid_columnconfigure(0, weight=1)
         self.key_entry = self.entry(key_row, self.key, show="●", placeholder_text="输入你自己的 Elsevier API Key")
+        self.key_entry.bind("<FocusOut>", self._persist_api_key)
         self.key_entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         self.visibility = ctk.CTkCheckBox(key_row, text="显示", variable=self.show_key, command=self._toggle_key,
             width=58, checkbox_width=18, checkbox_height=18, corner_radius=5, border_width=1,
@@ -236,8 +239,6 @@ class App(ctk.CTk, Controller, UpdateUI):
         footer = ctk.CTkFrame(self, fg_color=WHITE, corner_radius=0, height=80)
         footer.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         footer.grid_columnconfigure(0, weight=1)
-        self.label(footer, f"v{VERSION}   ·   XML + TXT + PDF\n高清图表 · 期刊式排版", font=self.small_font, color=MUTED,
-            justify="left").grid(row=0, column=0, sticky="w", padx=30, pady=16)
         self.secondary(footer, "打开文件夹", self.open_folder, width=100).grid(row=0, column=1, padx=(0, 8))
         self.pdf_button = self.editable(self.secondary(footer, "合成 PDF", self._pdf_dialog, width=110))
         self.pdf_button.grid(row=0, column=2, padx=(0, 8))

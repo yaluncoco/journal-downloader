@@ -15,8 +15,15 @@ from updater import Release
 
 
 class ControllerTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        state = patch("library_store.STATE_HOME", Path(tmp.name))
+        state.start()
+        self.addCleanup(state.stop)
+
     def quiet_app(self):
-        app = App(check_updates=False)
+        app = App(check_updates=False, remember_credentials=False)
         app.withdraw()
         def cleanup():
             app._cancel_update_notice()
@@ -28,6 +35,35 @@ class ControllerTests(unittest.TestCase):
             app.destroy()
         self.addCleanup(cleanup)
         return app
+
+    def test_key_persists_across_restart_and_opt_out_removes_it(self):
+        from credential_store import load_key, key_file
+        def close(app):
+            for callback in app.tk.call("after", "info"):
+                app.tk.call("after", "cancel", callback)
+            app.close()
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(controller, "SETTINGS_DIR", Path(temp)), \
+             patch("ui.SETTINGS_DIR", Path(temp)):
+            first = App(check_updates=False)
+            first.withdraw()
+            first.key.set("GUI_PRIVATE_SYNTHETIC_KEY")
+            close(first)
+            self.assertEqual(load_key(temp), "GUI_PRIVATE_SYNTHETIC_KEY")
+            second = App(check_updates=False)
+            second.withdraw()
+            self.assertEqual(second.key.get(), "GUI_PRIVATE_SYNTHETIC_KEY")
+            self.assertEqual(second.key_entry.cget("show"), "●")
+            second.remember_key.set(False)
+            second._persist_api_key()
+            close(second)
+            self.assertFalse(key_file(temp).exists())
+            third = App(check_updates=False)
+            third.withdraw()
+            self.assertEqual(third.key.get(), "")
+            self.assertFalse(third.remember_key.get())
+            close(third)
+            self.assertNotIn("PRIVATE_SYNTHETIC_KEY", (Path(temp) / "settings.json").read_text())
 
     def test_silent_update_check_runs_once_without_changing_download_state(self):
         app = self.quiet_app()
@@ -125,7 +161,7 @@ class ControllerTests(unittest.TestCase):
                 self.assertIsNone(app.worker)
 
     def test_update_dialog_shows_available_release(self):
-        app = App(check_updates=False)
+        app = App(check_updates=False, remember_credentials=False)
         app.withdraw()
         release = Release("v99.0.0", "", "", "", 100000, "")
         try:
@@ -156,7 +192,7 @@ class ControllerTests(unittest.TestCase):
                 self.emit(kind="counts", total=2, saved=1, reused=1, pending=1,
                           stage="pdf_finished_with_pending")
 
-        app = App(check_updates=False)
+        app = App(check_updates=False, remember_credentials=False)
         app.withdraw()
         try:
             app.active_job = "pdf"
@@ -167,7 +203,7 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(app.metrics["saved"].get(), "1")
             self.assertEqual(cfg.api_key, "")
             self.assertEqual(app.pdf_button.cget("state"), "normal")
-            self.assertIn("pdf_pending.jsonl", app.detail.get())
+            self.assertIn("本机应用数据", app.detail.get())
         finally:
             for callback in app.tk.call("after", "info"):
                 app.tk.call("after", "cancel", callback)
@@ -178,7 +214,7 @@ class ControllerTests(unittest.TestCase):
             root = Path(tmp)
             cached_index(root / PRESETS[0].issn, [{"doi": "10.1016/j.demo.2024.123456", "year": 2024,
                                                 "date": "2024", "title": "Test article"}])
-            app = App(check_updates=False)
+            app = App(check_updates=False, remember_credentials=False)
             app.withdraw()
             app.key.set("CONTROLLER_PRIVATE_TEST_KEY")
             app.url.set(PRESETS[0].url)

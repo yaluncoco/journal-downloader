@@ -6,7 +6,7 @@ if (-not (Test-Path -LiteralPath '.build-env\Scripts\python.exe')) {
 }
 & .build-env\Scripts\python.exe -m pip install -r requirements-build.txt
 if ($LASTEXITCODE -ne 0) { throw 'Cannot install build dependencies' }
-& .build-env\Scripts\python.exe -m unittest -v test_engine test_controller test_pdf test_updater
+& .build-env\Scripts\python.exe -m unittest -v test_engine test_controller test_pdf test_updater test_storage
 if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
 & .build-env\Scripts\python.exe -m PyInstaller --clean --noconfirm --onefile --windowed --collect-all customtkinter --name JournalDownloader --distpath release --icon app.ico --add-data 'app.ico;.' --add-data 'app.png;.' app.py
 if ($LASTEXITCODE -ne 0) { throw 'Build failed' }

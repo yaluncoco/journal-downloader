@@ -1,11 +1,11 @@
 """Parameterized, resumable Elsevier XML downloader. Only the standard library.
 
-No credential is written to disk. Crossref supplies a dated candidate list;
+No credential is written to paper folders or logs. Crossref supplies a dated candidate list;
 Elsevier's authenticated Article Retrieval API supplies entitled full text.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -26,8 +26,9 @@ import urllib.request
 import uuid
 
 from xml_utils import atomic_bytes, inspect_xml, plain_text, save_fulltext
+from library_store import state_dir, sidecar_path, existing_sidecar, migrate_library
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 AGENT = f"JournalXMLDownloader/{VERSION} (personal research)"
 FULLTEXT = {"fulltext_structured", "fulltext_rawtext"}
 NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)
@@ -204,7 +205,7 @@ def append_log(path, value):
 
 
 @contextmanager
-def library_lock(base):
+def _directory_lock(base):
     handle = (base / ".xml_download.lock").open("a+b")
     acquired = False
     try:
@@ -234,6 +235,34 @@ def library_lock(base):
                 import fcntl
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         handle.close()
+
+
+@contextmanager
+def library_lock(base, *, managed=False):
+    base = Path(base)
+    if not managed:
+        with _directory_lock(base):
+            yield
+        return
+    state = state_dir(base)
+    state.mkdir(parents=True, exist_ok=True)
+    legacy = base / ".xml_download.lock"
+    used_legacy = started = False
+    try:
+        with ExitStack() as stack:
+            if legacy.exists():
+                stack.enter_context(_directory_lock(base))
+                used_legacy = True
+            stack.enter_context(_directory_lock(state))
+            started = True
+            yield
+    finally:
+        if used_legacy and started:
+            try:
+                if legacy.read_bytes() == b"0":
+                    legacy.unlink()
+            except OSError:
+                pass
 
 
 class ElsevierRedirect(urllib.request.HTTPRedirectHandler):
@@ -308,7 +337,7 @@ def paths_for(base, row):
     name = re.sub(r"[^a-zA-Z0-9._-]", "_", doi)[:110] + "_" + hashlib.sha256(doi.encode()).hexdigest()[:8]
     return (base / "fulltext_xml" / str(row["year"]) / (name + ".xml"),
             base / "fulltext_txt" / str(row["year"]) / (name + ".txt"),
-            base / "review_required" / (name + ".xml"))
+            state_dir(base) / "review_required" / (name + ".xml"))
 
 
 def verify_saved(base, row):
@@ -320,7 +349,7 @@ def verify_saved(base, row):
             continue
         data = path.read_bytes()
         digest = hashlib.sha256(data).hexdigest()
-        checksum = path.with_suffix(".xml.sha256")
+        checksum = existing_sidecar(path)
         if checksum.exists() and checksum.read_text(encoding="ascii", errors="replace").strip() != digest:
             continue
         result = inspect_xml(data, row["doi"])
@@ -328,24 +357,27 @@ def verify_saved(base, row):
             continue
         # Legacy XML gets a baseline only after parsing, DOI and body checks.
         if not checksum.exists():
-            atomic_bytes(checksum, (digest + "\n").encode("ascii"))
-        txt = base / "fulltext_txt" / path.parent.name / path.with_suffix(".txt").name
-        if not txt.exists():
-            atomic_bytes(txt, plain_text(data, row["doi"]).encode("utf-8"))
+            atomic_bytes(sidecar_path(path), (digest + "\n").encode("ascii"))
         return {**result, "file": str(path.relative_to(base)), "sha256": digest, "bytes": len(data)}
     return None
 
 
 def library_path(root, journal):
     for filename in ("journal.json", "index_summary.json"):
-        old = load_json(root / filename, {})
+        old = load_json(state_dir(root) / filename, None) or load_json(root / filename, {})
         if old.get("issn") == journal.issn:
             return root
+    if root.name == journal.issn and (root / "fulltext_xml").is_dir():
+        return root
     # ISSN is the stable identifier, independent of URL spelling or year range.
     return root / journal.issn
 
 
 class Downloader:
+    @property
+    def state(self):
+        return state_dir(self.base)
+
     def __init__(self, config, emit=lambda **event: None, control=None):
         config.validate()
         self.config = config
@@ -441,7 +473,7 @@ class Downloader:
 
     def collect(self):
         cfg = self.config
-        path = self.base / "indexes" / f"{cfg.start_year}-{cfg.end_year}.json"
+        path = self.state / "indexes" / f"{cfg.start_year}-{cfg.end_year}.json"
         cached = load_json(path, {})
         if (not cfg.refresh and cached.get("complete") is True and cached.get("issn") == self.journal.issn
                 and cached.get("years") == [cfg.start_year, cfg.end_year]):
@@ -452,13 +484,16 @@ class Downloader:
                     self.log(f"使用已保存的论文列表：{len(records)} 条（{cached.get('created_at', '')}）。")
                     return records
         # Reuse the verified CLI's finished index without requiring a new network query.
-        legacy = load_json(self.base / "index_summary.json", {})
+        legacy = load_json(self.state / "index_summary.json", None) or load_json(self.base / "index_summary.json", {})
         bounds = legacy.get("requested_years", [])
         if (not cfg.refresh and legacy.get("issn") == self.journal.issn and len(bounds) == 2
                 and bounds[0] <= cfg.start_year <= cfg.end_year <= bounds[1]
                 and legacy.get("queries") and all(q.get("exhausted") for q in legacy["queries"])):
             try:
-                old_records = [json.loads(line) for line in (self.base / "manifest.jsonl").read_text(encoding="utf-8").splitlines() if line]
+                manifest = self.state / "manifest.jsonl"
+                if not manifest.exists():
+                    manifest = self.base / "manifest.jsonl"
+                old_records = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line]
                 if (len(old_records) == legacy.get("records") and
                         len({r["doi"] for r in old_records}) == len(old_records)):
                     records = [r for r in old_records if cfg.start_year <= r["year"] <= cfg.end_year]
@@ -505,12 +540,12 @@ class Downloader:
         return records
 
     def persist_pause(self, deadline, reason):
-        save_json(self.base / "server_pause.json", {"deadline": deadline, "reason": reason})
+        save_json(self.state / "server_pause.json", {"deadline": deadline, "reason": reason})
 
     def server_wait(self, seconds, reason):
         self.persist_pause(time.time() + seconds, reason)
         self.control.wait(seconds, reason)
-        save_json(self.base / "server_pause.json", {"deadline": 0})
+        save_json(self.state / "server_pause.json", {"deadline": 0})
 
     def fetch(self, doi):
         url = "https://api.elsevier.com/content/article/doi/" + urllib.parse.quote(doi, safe="/") + "?view=FULL"
@@ -570,8 +605,8 @@ class Downloader:
                    "downloaded_this_run": self.new_count, "pending": len(pending),
                    "max_downloads": self.config.max_downloads, "download_target": self.download_target,
                    "failed_or_review": len(self.failures), "source": "Crossref candidate list; Elsevier XML"}
-        save_json(self.base / "download_summary.json", summary)
-        save_lines(self.base / "pending.jsonl", pending)
+        save_json(self.state / "download_summary.json", summary)
+        save_lines(self.state / "pending.jsonl", pending)
         self.emit(kind="counts", **summary)
 
     def run(self):
@@ -579,13 +614,14 @@ class Downloader:
         self.base = library_path(Path(self.config.output), self.journal)
         self.base.mkdir(parents=True, exist_ok=True)
         self.emit(kind="library", path=str(self.base), journal=self.journal.name, issn=self.journal.issn)
-        with library_lock(self.base):
-            save_json(self.base / "journal.json", {"name": self.journal.name, "issn": self.journal.issn, "url": self.journal.url})
+        with library_lock(self.base, managed=True):
+            migrate_library(self.base)
+            save_json(self.state / "journal.json", {"name": self.journal.name, "issn": self.journal.issn, "url": self.journal.url})
             self.log(f"期刊：{self.journal.name} · ISSN {self.journal.issn}")
             self.log("Elsevier 网络：" + ("直连（不使用系统 HTTP 代理）" if self.config.network == "direct" else "系统代理"))
             self.records = self.collect()
-            save_lines(self.base / "manifest.jsonl", self.records)
-            self.latest = latest_log(self.base / "download_log.jsonl")
+            save_lines(self.state / "manifest.jsonl", self.records)
+            self.latest = latest_log(self.state / "download_log.jsonl")
             try:
                 self.download()
             except Cancelled:
@@ -621,7 +657,7 @@ class Downloader:
         if not pending:
             self.report("finished_with_pending" if len(self.saved) < total else "complete")
             return
-        pause = load_json(self.base / "server_pause.json", {})
+        pause = load_json(self.state / "server_pause.json", {})
         deadline = quota_deadline(pause.get("deadline"))
         if deadline:
             self.control.wait(deadline - time.time(), pause.get("reason", "等待服务器恢复"))
@@ -655,11 +691,11 @@ class Downloader:
                         self.new_count += 1
                     elif result["status"] != "api_error":
                         atomic_bytes(review, data)
-                        result["file"] = str(review.relative_to(self.base))
+                        result["file"] = str(review.relative_to(self.state))
                 status = result["status"]
                 if status not in FULLTEXT:
                     self.failures[doi] = result
-                append_log(self.base / "download_log.jsonl", self.scrub(result))
+                append_log(self.state / "download_log.jsonl", self.scrub(result))
                 self.latest[doi] = result
                 label = "全文已保存" if status in FULLTEXT else {
                     "no_fulltext": "仅返回元数据，未计为全文", "invalid_xml": "XML 不完整，留待检查",

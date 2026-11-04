@@ -7,11 +7,14 @@ import threading
 import tkinter as tk
 from tkinter import filedialog,messagebox
 from engine import ActionRequired,Cancelled,Config,Control,Downloader,PRESETS,save_json
+from credential_store import load_key, save_key, forget_key
 SETTINGS_DIR = Path(os.environ.get("LOCALAPPDATA",str(Path.home()))) / "JournalXMLDownloader"
 
 class Controller:
     def _variables(self):
-        self.key = tk.StringVar()
+        self.remember_key = tk.BooleanVar(value=self.settings.get("remember_key", True))
+        remembered = load_key(SETTINGS_DIR) if self.use_key_store and self.remember_key.get() else ""
+        self.key = tk.StringVar(value=remembered)
         self.show_key = tk.BooleanVar(value=False)
         self.preset = tk.StringVar()
         self.url = tk.StringVar(value=self.settings.get("url", PRESETS[0].url))
@@ -37,6 +40,20 @@ class Controller:
     def _toggle_key(self):
         self.key_entry.configure(show="" if self.show_key.get() else "●")
 
+    def _persist_api_key(self, event=None):
+        if not self.use_key_store or getattr(self, "_credentials_closed", False):
+            return
+        try:
+            if self.remember_key.get():
+                save_key(SETTINGS_DIR, self.key.get())
+            else:
+                forget_key(SETTINGS_DIR)
+            self.settings["remember_key"] = self.remember_key.get()
+            allowed = {"url", "start_year", "end_year", "output", "network", "issn", "max_downloads", "remember_key"}
+            save_json(SETTINGS_DIR / "settings.json", {k: v for k, v in self.settings.items() if k in allowed})
+        except (OSError, ValueError):
+            self._log("Key 本机记忆未成功，当前仍可使用；请检查 Key 格式或本机文件权限。")
+
     def _browse(self):
         folder = filedialog.askdirectory(title="选择保存文件夹（也可选择原有 RSE 下载目录）", initialdir=self.output.get() if Path(self.output.get()).exists() else str(Path.home()))
         if folder:
@@ -55,11 +72,13 @@ class Controller:
 
     def _save_settings(self, cfg):
         # Explicit allowlist: never serialize Config or any credential wholesale.
-        save_json(SETTINGS_DIR / "settings.json", {
+        self.settings = {
             "url": cfg.url, "start_year": cfg.start_year, "end_year": cfg.end_year,
             "output": str(cfg.output), "network": cfg.network, "issn": cfg.issn,
             "max_downloads": cfg.max_downloads,
-        })
+            "remember_key": self.remember_key.get(),
+        }
+        save_json(SETTINGS_DIR / "settings.json", self.settings)
 
     def _busy(self, busy):
         for widget, normal_state in self.mutable:
@@ -91,6 +110,7 @@ class Controller:
             if self.advanced_window and self.advanced_window.winfo_exists():
                 self.advanced_window.destroy()
             self._save_settings(cfg)
+            self._persist_api_key()
         except (ValueError, OSError) as error:
             messagebox.showerror("请检查下载设置", str(error), parent=self)
             return
@@ -147,6 +167,7 @@ class Controller:
                             start_year=int(self.start_year.get()), end_year=int(self.end_year.get()),
                             layout=layout)
             cfg.validate()
+            self._persist_api_key()
         except (ValueError, OSError) as error:
             messagebox.showerror("请检查 PDF 设置", str(error), parent=self)
             return
@@ -264,7 +285,7 @@ class Controller:
                     if self.active_job == "pdf":
                         if self.stages == "pdf_finished_with_pending":
                             self.status.set("合成结束 · 部分待处理")
-                            text = "部分 XML 或图片需要检查，详见 pdf_pending.jsonl；再次合成会重试并跳过完整 PDF。"
+                            text = "部分 XML 或图片需要检查，请查看运行记录；详细记录保存在本机应用数据中，再次合成可重试。"
                         elif self.metrics["total"].get() == "0":
                             self.status.set("未找到 XML")
                             text = "所选文件夹和年份范围内未找到 XML，请选择已有文库或 fulltext_xml 文件夹。"
@@ -276,7 +297,7 @@ class Controller:
                         text = f"本次成功下载 {self.downloaded_this_run} 篇。再次开始会跳过完整文件，继续下载剩余论文。"
                     elif self.stages == "finished_with_pending":
                         self.status.set("已结束 · 部分条目待处理")
-                        text = "未保存的条目见 pending.jsonl；可勾选「重新尝试」后再次开始。"
+                        text = "未保存条目已记录到本机应用数据；可勾选「重新尝试」后再次开始。"
                     elif self.metrics["total"].get() == "0":
                         self.status.set("未找到记录")
                         text = "所选年份暂无已登记的论文。可调整年份，或勾选「更新论文列表」重试。"
@@ -293,6 +314,8 @@ class Controller:
         self.after(120, self._poll)
 
     def close(self):
+        self._persist_api_key()
+        self._credentials_closed = True
         self._cancel_update_notice()
         if self.worker and self.worker.is_alive():
             self.closing = True

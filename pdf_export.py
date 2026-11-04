@@ -18,8 +18,9 @@ from engine import (ActionRequired, Cancelled, Control, append_log, atomic_bytes
                     library_lock, load_json, save_json, save_lines, timestamp)
 from pdf_assets import ImageCache, image_objects
 from pdf_document import Article
+from library_store import state_dir, existing_sidecar, sidecar_path, migrate_pdf
 
-RENDERER_VERSION = "1.1.0-layout3"
+RENDERER_VERSION = "1.3.0-layout5"
 
 
 @dataclass
@@ -123,7 +124,8 @@ class PdfExporter:
         if source.parent.name == "fulltext_xml":
             library = source.parent.parent
         self.output = (cfg.output or library / "fulltext_pdf").resolve()
-        self.cache = self.output / ".image-cache"
+        self.state = state_dir(self.output)
+        self.cache = self.state / "image-cache"
         self.browser = None
 
     def count(self, total, saved, reused, stage):
@@ -133,7 +135,8 @@ class PdfExporter:
     def run(self):
         self.output.mkdir(parents=True, exist_ok=True)
         self.emit(kind="library", path=str(self.output))
-        with library_lock(self.output):
+        with library_lock(self.output, managed=True):
+            migrate_pdf(self.output)
             return self._run()
 
     def _run(self):
@@ -141,6 +144,9 @@ class PdfExporter:
         records = []
         for source in sorted(self.xml_root.rglob("*.xml")):
             self.control.checkpoint()
+            if any(part in ("review_required", "fulltext_pdf", ".image-cache", ".work")
+                   for part in source.relative_to(self.xml_root).parts[:-1]):
+                continue
             # Existing libraries archive by year; restrict before reading large files.
             year = next((int(p) for p in reversed(source.relative_to(self.xml_root).parts[:-1]) if re.fullmatch(r"\d{4}", p)), None)
             if year is None and re.fullmatch(r"\d{4}", self.xml_root.name):
@@ -161,7 +167,7 @@ class PdfExporter:
             try:
                 data = source.read_bytes()
                 digest = hashlib.sha256(data).hexdigest()
-                sidecar = source.with_suffix(".xml.sha256")
+                sidecar = existing_sidecar(source)
                 if sidecar.exists() and sidecar.read_text(encoding="ascii").strip().lower() != digest:
                     raise ValueError("XML 的 SHA-256 校验失败，请重新下载本篇 XML。")
                 article = Article(data)
@@ -169,7 +175,7 @@ class PdfExporter:
                     total -= 1
                     continue
                 record["doi"] = article.doi
-                meta_path = target.with_suffix(".pdf.json")
+                meta_path = sidecar_path(target)
                 fingerprint = {"xml_sha256": digest, "layout": self.cfg.layout,
                                "renderer": RENDERER_VERSION, "doi": article.doi}
                 if self.reusable(target, meta_path, fingerprint):
@@ -194,7 +200,7 @@ class PdfExporter:
                         cache.key = ""
                     document = article.render(images, self.cfg.layout)
                     self.emit(kind="phase", text=f"正在排版与校验 PDF · {article.doi}")
-                    temp_base = self.output / ".work"
+                    temp_base = self.state / "work"
                     temp_base.mkdir(exist_ok=True)
                     with tempfile.TemporaryDirectory(prefix="pdf-", dir=temp_base, ignore_cleanup_errors=True) as tmp:
                         pdf = render_pdf(document, self.browser, Path(tmp), self.control)
@@ -216,12 +222,12 @@ class PdfExporter:
             finally:
                 self.count(total, saved, reused, "pdf")
                 if "status" in record:
-                    append_log(self.output / "pdf_log.jsonl", record)
-                save_lines(self.output / "pdf_pending.jsonl", pending)
+                    append_log(self.state / "pdf_log.jsonl", record)
+                save_lines(self.state / "pdf_pending.jsonl", pending)
         stage = "pdf_finished_with_pending" if pending else "pdf_finished"
         result = {"checked_at": timestamp(), "total": total, "saved": saved,
                   "reused": reused, "pending": len(pending), "layout": self.cfg.layout}
-        save_json(self.output / "pdf_summary.json", result)
+        save_json(self.state / "pdf_summary.json", result)
         self.count(total, saved, reused, stage)
         return result
 

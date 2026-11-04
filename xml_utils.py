@@ -99,8 +99,8 @@ def atomic_bytes(path, data):
 
 
 def save_fulltext(target, txt, data, doi):
+    from library_store import sidecar_path
     atomic_bytes(target, data)
     digest = hashlib.sha256(data).hexdigest()
-    atomic_bytes(target.with_suffix(".xml.sha256"), (digest + "\n").encode("ascii"))
-    atomic_bytes(txt, plain_text(data, doi).encode("utf-8"))
+    atomic_bytes(sidecar_path(target), (digest + "\n").encode("ascii"))
     return digest

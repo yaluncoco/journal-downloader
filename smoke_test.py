@@ -21,6 +21,17 @@ def cached_index(base, rows, issn=PRESETS[0].issn):
 
 
 def run(output, online=False, pdf=False):
+    import library_store
+    original = library_store.STATE_HOME
+    with tempfile.TemporaryDirectory(prefix="journal-state-test-") as state:
+        library_store.STATE_HOME = Path(state)
+        try:
+            _run(output, online, pdf)
+        finally:
+            library_store.STATE_HOME = original
+
+
+def _run(output, online=False, pdf=False):
     results = {}
     try:
         import tkinter as tk
@@ -29,7 +40,7 @@ def run(output, online=False, pdf=False):
         results["tk"] = str(root.tk.call("info", "patchlevel"))
         root.destroy()
         from ui import App
-        app = App(check_updates=False)
+        app = App(check_updates=False, remember_credentials=False)
         app.withdraw()
         app.update_idletasks()
         app._on_preset("ISPRS")
@@ -97,6 +108,15 @@ def run(output, online=False, pdf=False):
                 assert limited.new_count == 1 and limited.reused == expected_reused
                 assert len(calls) == 1
             results["download_limit_and_resume"] = True
+            assert all(path.suffix == ".xml" for path in base.rglob("*") if path.is_file())
+            results["clean_paper_folders"] = True
+            from credential_store import save_key, load_key, forget_key, key_file
+            private_dir = Path(tmp) / "credentials"
+            save_key(private_dir, config.api_key)
+            assert load_key(private_dir) == config.api_key
+            assert config.api_key.encode() not in key_file(private_dir).read_bytes()
+            forget_key(private_dir)
+            results["encrypted_key_roundtrip"] = True
             for path in Path(tmp).rglob("*"):
                 if path.is_file():
                     assert config.api_key.encode() not in path.read_bytes()

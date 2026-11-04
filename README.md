@@ -1,6 +1,6 @@
 # 期刊全文下载器
 
-一个简洁的 Windows 桌面工具：输入自己的 Elsevier API Key，选择 ScienceDirect 期刊和发表年份，下载有权限访问的 XML 全文，并生成便于阅读的 TXT。也可为已有 XML 补齐高清图片，批量合成期刊式 PDF。
+一个简洁的 Windows 桌面工具：输入自己的 Elsevier API Key，选择 ScienceDirect 期刊和发表年份，下载有权限访问的 XML 全文，也可为已有 XML 补齐高清图片，批量合成期刊式 PDF。文库只保留 XML 和 PDF，辅助状态与图片缓存统一保存在本机应用数据中。
 
 预置 **Remote Sensing of Environment（RSE）** 与 **ISPRS Journal of Photogrammetry and Remote Sensing**，也支持输入其他期刊主页地址。
 
@@ -35,10 +35,12 @@ https://www.sciencedirect.com/search?pub=Remote+Sensing+of+Environment&date=2024
 - 可设置本次成功下载篇数；已有完整文件、失败和重试不占名额，达到数量自动结束，再次开始可继续下一批。
 - 临时网络错误自动重试，遵守服务器限流与配额等待时间。
 - 默认直连 Elsevier，避免系统 HTTP 代理影响机构权限识别。
-- API Key 仅在内存中使用，不写入应用设置或下载日志。
+- API Key 默认使用 Windows DPAPI 加密记忆，下次自动填入；取消「本机加密记住 Key」会清除已记忆的 Key。普通设置、日志和文库中不保存明文 Key。
+- 不再生成 TXT；旧版日志、校验记录、图片缓存和 TXT 会迁移到本机应用数据，已有 XML 与 PDF 保持原位置。
 - 同一期刊按年份归档，多个期刊按 ISSN 分开保存。
 - 独立的 PDF 合成入口：读取现有结构化 XML，补齐高清图片，保留图题、表格、MathML 公式及参考文献。
 - 期刊双栏 / 舒适单栏排版，宽图表跨栏、长表格跨页、较长公式自动调整宽度。
+- 彩色数字、文字等行内图片按文字字号排版，仍使用高清图片；表头与首行保持在一起，末尾比较行尽量同页。
 - 图片缓存解码与 SHA-256 校验；PDF 按 XML 哈希、版式、排版版本、文件哈希与可读取性校验后跳过。
 - 单篇缺图、XML 损坏或不支持的内容记录待处理，继续其他论文；再次合成可重试。
 - 紧凑的向上箭头更新入口、新版红点提示，下载 SHA-256 校验、新版启动自检、原程序备份及替换失败恢复。
@@ -49,7 +51,7 @@ https://www.sciencedirect.com/search?pub=Remote+Sensing+of+Environment&date=2024
 
 全文由 Elsevier Article Retrieval API 提供，插图由 Object Retrieval API 提供。API Key、机构订阅及网络出口决定实际可访问范围。本程序不绕过访问控制。
 
-PDF 是依据 XML 和图片重新排版的阅读版，标有来源说明；不是出版社官方 PDF，不能保证相同字体、分页或图表位置。rawtext / 仅摘要 XML 不会被标为完整图文 PDF，需保留为待处理；补充附件不嵌入 PDF。TXT 的公式、表格和排版可能失真。
+PDF 是依据 XML 和图片重新排版的阅读版，标有来源说明；不是出版社官方 PDF，不能保证相同字体、分页或图表位置。rawtext / 仅摘要 XML 不会被标为完整图文 PDF，需保留为待处理；补充附件不嵌入 PDF。
 
 IEEE 接口目前处于验证阶段，尚未启用下载入口。测试账号仍待审批，首次请求返回 `403 Developer Inactive`；格式与权限说明见 [IEEE 接口核对](IEEE接口说明.md)。
 
@@ -66,7 +68,7 @@ python -m venv .build-env
 ## 测试与构建
 
 ```powershell
-.\.build-env\Scripts\python.exe -m unittest -v test_engine test_controller test_pdf test_updater
+.\.build-env\Scripts\python.exe -m unittest -v test_engine test_controller test_pdf test_updater test_storage
 .\build.ps1
 ```
 
@@ -87,7 +89,7 @@ EXE 输出到 `release/JournalDownloader.exe`。XML 下载引擎使用 Python �
 .\release\JournalDownloader.exe --pdf-export "D:\文库\fulltext_xml" "D:\文库\fulltext_pdf"
 ```
 
-结果保存在输出目录 `offline_export_result.json`；可加 `--single-column` 改为单栏。首次获取图片请使用界面输入 Key。
+结果保存在本机应用数据中的 `offline_export_result.json`，输出目录只放 PDF；可加 `--single-column` 改为单栏。首次获取图片请使用界面输入 Key。
 
 ## 代码结构
 
@@ -98,14 +100,18 @@ EXE 输出到 `release/JournalDownloader.exe`。XML 下载引擎使用 Python �
 | `controller.py` | 工作线程、进度事件与设置 |
 | `engine.py` | 期刊识别、元数据索引、下载与重试 |
 | `xml_utils.py` | XML 校验与原子保存 |
+| `library_store.py` | 辅助数据迁移、本机状态与完整性记录 |
+| `credential_store.py` | Windows DPAPI 加密 Key 记忆与清除 |
 | `pdf_assets.py` | 图片对象获取、重试与缓存校验 |
 | `pdf_document.py` | XML、CALS 表格、MathML 到安全排版 HTML |
 | `pdf_export.py` | PDF 批量合成、后台浏览器和断点校验 |
 | `updater.py`、`update_ui.py` | 手动检查版本、校验下载、替换及失败恢复 |
-| `test_engine.py`、`test_controller.py`、`test_pdf.py`、`test_updater.py` | 引擎、界面、PDF 和更新流程测试 |
+| `test_engine.py`、`test_controller.py`、`test_pdf.py`、`test_updater.py`、`test_storage.py` | 引擎、界面、PDF、更新、数据迁移和 Key 加密测试 |
 | `smoke_test.py` | 打包程序自检 |
 
 仓库不包含 API Key、用户配置或下载的论文全文。运行产生的文库、日志和构建产物已加入忽略规则。
+
+辅助数据在 `%LOCALAPPDATA%\JournalXMLDownloader\library-data\`。迁移只处理程序已知的辅助文件，保留未知文件；不同内容的同名旧记录会归档，避免覆盖。搬动文库或更换电脑后，本机完整性记录和图片缓存不会自动跟随，可能需要重新验证 XML、重新合成 PDF 或下载图片。
 
 ## 图标
 

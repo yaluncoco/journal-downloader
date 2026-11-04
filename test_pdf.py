@@ -14,6 +14,7 @@ from engine import ActionRequired, Cancelled, Control, load_json, save_json
 from pdf_assets import ImageCache, MissingImage, image_details, object_url
 from pdf_document import Article, math_html
 from pdf_export import PdfConfig, PdfExporter, RENDERER_VERSION, validate_pdf
+from library_store import state_dir
 
 DOI = "10.1016/j.example.2024.000001"
 URL = "https://api.elsevier.com/content/object/eid/1-s2.0-S0000000000000000-gr1_lrg.jpg?httpAccept=%2A%2F%2A"
@@ -49,6 +50,25 @@ class Response(io.BytesIO):
 
 
 class PdfTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        state = patch("library_store.STATE_HOME", Path(tmp.name))
+        state.start()
+        self.addCleanup(state.stop)
+
+    def test_inline_high_resolution_images_use_text_scale(self):
+        body = '<para>The best results are <inline-figure><link locator="fx1"/></inline-figure>.</para>'
+        objects = '<object ref="fx1" type="IMAGE-HIGH-RES" width="353" height="55"/><object ref="fx1" type="IMAGE-DOWNSAMPLED" width="79" height="12"/>'
+        document = Article(fixture(body, objects=objects)).render({"fx1": Path("sharp.png")})
+        self.assertIn('class="inline-image" style="height:1.0000em"', document)
+        self.assertNotIn('max-height: 12mm', document)
+        fallback = Article(fixture(body)).render({"fx1": Path("sharp.png")})
+        self.assertIn('style="height:0.9500em"', fallback)
+        objects = '<object ref="fx1" type="IMAGE-DOWNSAMPLED" height="24"/>'
+        fraction = Article(fixture(body, objects=objects)).render({"fx1": Path("fraction.png")})
+        self.assertIn('style="height:2.0000em"', fraction)
+
     def test_url_rejects_external_and_removes_credentials(self):
         for url in ("http://api.elsevier.com/content/object/eid/x", "https://evil.test/content/object/eid/x",
                     "https://api.elsevier.com@evil.test/content/object/eid/x", "https://api.elsevier.com/content/article/eid/x",
@@ -162,7 +182,8 @@ class PdfTests(unittest.TestCase):
                 result = PdfExporter(PdfConfig(source.parent, output=output)).run()
                 self.assertEqual(result["reused"], 0)
                 self.assertEqual(result["saved"], 1)
-            self.assertIn("SHA-256", (output / "pdf_pending.jsonl").read_text(encoding="utf-8"))
+            self.assertIn("SHA-256", (state_dir(output) / "pdf_pending.jsonl").read_text(encoding="utf-8"))
+            self.assertTrue(all(p.suffix == ".pdf" for p in output.rglob("*") if p.is_file()))
 
     def test_resume_rejects_wrong_layout_xml_and_pdf(self):
         with tempfile.TemporaryDirectory() as temp:
