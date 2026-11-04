@@ -23,7 +23,7 @@ class ControllerTests(unittest.TestCase):
         self.addCleanup(state.stop)
 
     def quiet_app(self):
-        app = App(check_updates=False, remember_credentials=False)
+        app = App(check_updates=False, remember_credentials=False, scan_libraries=False)
         app.withdraw()
         def cleanup():
             app._cancel_update_notice()
@@ -35,6 +35,73 @@ class ControllerTests(unittest.TestCase):
             app.destroy()
         self.addCleanup(cleanup)
         return app
+
+    def test_pdf_footer_reports_complete_partial_empty_and_stopped_truthfully(self):
+        app = self.quiet_app()
+        app.active_job = "pdf"
+        for total, saved, pending, stage, outcome, expected in (
+                (2, 2, 0, "pdf_finished", "complete", "PDF 已生成完成 · 2 篇"),
+                (2, 1, 1, "pdf_finished_with_pending", "complete", "1 篇待处理"),
+                (0, 0, 0, "pdf_finished", "complete", "未找到可合成"),
+                (2, 1, 1, "pdf", "stopped", "已停止")):
+            with self.subTest(stage=stage, outcome=outcome):
+                app.events.put({"kind": "counts", "total": total, "saved": saved, "reused": 0,
+                                "pending": pending, "stage": stage})
+                app.events.put({"kind": "done", "outcome": outcome, "text": "Test result"})
+                app._poll()
+                self.assertIn(expected, app.pdf_status.get())
+                self.assertEqual(app.pdf_progress.get(), saved / max(1, total))
+        footer = app.pdf_status.get()
+        app.active_job = "xml"
+        app.events.put({"kind": "counts", "total": 5, "saved": 3, "reused": 3, "pending": 2, "stage": "downloading"})
+        app._poll()
+        self.assertEqual(app.pdf_status.get(), footer)
+
+    def test_folder_scan_restores_existing_library_and_ignores_stale_results(self):
+        from test_inventory import identified_xml
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            library = root / "moved-isprs"
+            folder = library / "fulltext_xml/2024"
+            folder.mkdir(parents=True)
+            (folder / "article.xml").write_bytes(identified_xml("10.1016/j.demo.preview", PRESETS[1]))
+            app = self.quiet_app()
+            app.scan_libraries = True
+            app._init_library_watch()
+            app.url.set(PRESETS[0].url)
+            app.start_year.set("2024")
+            app.end_year.set("2024")
+            app.output.set(str(folder))
+            app.after_cancel(app.scan_after)
+            app.scan_after = None
+            app._start_library_scan()
+            app.scan_worker.join(5)
+            app._poll()
+            self.assertFalse(app.scan_worker.is_alive())
+            self.assertEqual(app.metrics["saved"].get(), "1")
+            self.assertEqual(app.metrics["total"].get(), "待获取")
+            self.assertIn("1 篇完整 XML", app.local_hint.get())
+            self.assertEqual(app.preset.get(), "ISPRS")
+            self.assertEqual(app.library, library)
+            stale = app.scan_generation
+            app.output.set(str(root / "new"))
+            app.events.put({"kind": "library_preview", "generation": stale, "error": "stale error"})
+            app._poll()
+            self.assertNotIn("stale", app.local_hint.get())
+            app._cancel_library_scan()
+
+    def test_catalog_dialog_searches_locally_and_pages_without_network(self):
+        app = self.quiet_app()
+        app._catalog_dialog()
+        app.catalog_window.withdraw()
+        app.catalog_query.set("remote sensing")
+        deadline = time.monotonic() + 2
+        while not app.catalog_matches and time.monotonic() < deadline:
+            app.update()
+            time.sleep(0.02)
+        self.assertIn("0034-4257", [item["issn"] for item in app.catalog_matches])
+        self.assertIn("0924-2716", [item["issn"] for item in app.catalog_matches])
+        app.catalog_window.destroy()
 
     def test_key_persists_across_restart_and_opt_out_removes_it(self):
         from credential_store import load_key, key_file

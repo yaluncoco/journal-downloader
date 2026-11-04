@@ -169,9 +169,9 @@ class EngineTests(unittest.TestCase):
                 self.assertEqual(e.load_json(runner.state / "download_summary.json")["stage"], "complete")
 
     def test_custom_journal_exact_resolution(self):
-        self.cfg.url = "https://www.sciencedirect.com/journal/agricultural-and-forest-meteorology"
+        self.cfg.url = "https://www.sciencedirect.com/journal/synthetic-forest-measurements"
         r = self.runner()
-        r.public_json = lambda u: {"message": {"items": [{"title": "Agricultural and Forest Meteorology", "ISSN": ["0168-1923"]}]}}
+        r.public_json = lambda u: {"message": {"items": [{"title": "Synthetic Forest Measurements", "ISSN": ["0168-1923"]}]}}
         self.assertEqual(r.resolve().issn, "0168-1923")
         r.public_json = lambda u: {"message": {"items": [{"title": "Wrong Journal", "ISSN": ["0168-1923"]}]}}
         with self.assertRaises(e.ActionRequired):

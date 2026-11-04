@@ -40,7 +40,7 @@ def _run(output, online=False, pdf=False):
         results["tk"] = str(root.tk.call("info", "patchlevel"))
         root.destroy()
         from ui import App
-        app = App(check_updates=False, remember_credentials=False)
+        app = App(check_updates=False, remember_credentials=False, scan_libraries=False)
         app.withdraw()
         app.update_idletasks()
         app._on_preset("ISPRS")
@@ -61,6 +61,19 @@ def _run(output, online=False, pdf=False):
         app._set_update_available(Release("v0.0.0", "", "", "", 100000, ""))
         assert not app.update_available and not app.update_badge.winfo_manager()
         results["update_arrow_and_badge"] = True
+        from journal_catalog import catalog, search
+        from engine import local_journal
+        assert catalog()["count"] > 5000
+        assert any(item["issn"] == "0034-4257" for item in search("remote sensing environment"))
+        assert local_journal("https://www.sciencedirect.com/science/journal/01681923").issn == "0168-1923"
+        results["bundled_journal_catalog"] = catalog()["count"]
+        app.active_job = "pdf"
+        app.events.put({"kind": "counts", "total": 2, "saved": 2, "reused": 1,
+                        "pending": 0, "stage": "pdf_finished"})
+        app.events.put({"kind": "done", "outcome": "complete", "text": "Done"})
+        app._poll()
+        assert app.pdf_progress.get() == 1 and "已生成完成" in app.pdf_status.get()
+        results["pdf_completion_footer"] = True
         app.destroy()
         results["modern_ui_events"] = True
         from updater import version_tuple, safe_url
@@ -108,6 +121,16 @@ def _run(output, online=False, pdf=False):
                 assert limited.new_count == 1 and limited.reused == expected_reused
                 assert len(calls) == 1
             results["download_limit_and_resume"] = True
+            from library_inventory import scan_existing
+            inventory = scan_existing(base, 2024, 2024)
+            assert len(inventory["saved"]) == 1
+            renamed = target.with_name("user-renamed.xml")
+            target.rename(renamed)
+            imported = Downloader(config)
+            imported.fetch = no_request
+            imported.run()
+            assert imported.reused == 1 and imported.new_count == 0
+            results["renamed_xml_resume"] = True
             assert all(path.suffix == ".xml" for path in base.rglob("*") if path.is_file())
             results["clean_paper_folders"] = True
             from credential_store import save_key, load_key, forget_key, key_file

@@ -28,7 +28,7 @@ import uuid
 from xml_utils import atomic_bytes, inspect_xml, plain_text, save_fulltext
 from library_store import state_dir, sidecar_path, existing_sidecar, migrate_library
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 AGENT = f"JournalXMLDownloader/{VERSION} (personal research)"
 FULLTEXT = {"fulltext_structured", "fulltext_rawtext"}
 NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)
@@ -39,10 +39,11 @@ class Journal:
     name: str
     slug: str
     issn: str
+    link: str = ""
 
     @property
     def url(self):
-        return "https://www.sciencedirect.com/journal/" + self.slug
+        return self.link or "https://www.sciencedirect.com/journal/" + self.slug
 
 
 PRESETS = (
@@ -75,6 +76,8 @@ def parse_journal_url(value):
             or url.port not in (None, 80, 443)):
         raise ValueError("请粘贴 ScienceDirect 的期刊主页地址（不是单篇论文地址）。")
     parts = url.path.strip("/").split("/")
+    if len(parts) >= 3 and parts[:2] == ["science", "journal"] and re.fullmatch(r"\d{7}[\dXx]", parts[2]):
+        return parts[2].upper(), parts[2].upper()
     if len(parts) >= 2 and parts[0] == "journal" and re.fullmatch(r"[a-z0-9-]+", parts[1]):
         slug = parts[1]
         return slug, slug.replace("-", " ")
@@ -85,6 +88,19 @@ def parse_journal_url(value):
             slug = re.sub(r"[^a-z0-9]+", "-", html.unescape(title).lower().replace("&", "and")).strip("-")
             return slug, title
     raise ValueError("支持 /journal/期刊名称 地址，或含 pub=期刊名称 的检索地址。")
+
+
+def local_journal(value):
+    """Resolve catalogue/preset journals offline, without spending API requests."""
+    from journal_catalog import lookup
+    slug, title = parse_journal_url(value)
+    for journal in PRESETS:
+        if slug in (journal.slug, journal.issn.replace("-", "")) or normalize_title(title) == normalize_title(journal.name):
+            return journal
+    item = lookup(slug, title)
+    if item and item["issn"]:
+        return Journal(item["name"], slug, item["issn"], item["url"])
+    return None
 
 
 @dataclass
@@ -363,14 +379,8 @@ def verify_saved(base, row):
 
 
 def library_path(root, journal):
-    for filename in ("journal.json", "index_summary.json"):
-        old = load_json(state_dir(root) / filename, None) or load_json(root / filename, {})
-        if old.get("issn") == journal.issn:
-            return root
-    if root.name == journal.issn and (root / "fulltext_xml").is_dir():
-        return root
-    # ISSN is the stable identifier, independent of URL spelling or year range.
-    return root / journal.issn
+    from library_inventory import resolve_library
+    return resolve_library(root, journal.issn, journal.name)
 
 
 class Downloader:
@@ -452,12 +462,18 @@ class Downloader:
     def resolve(self):
         slug, title = parse_journal_url(self.config.url)
         norm = normalize_title(title)
-        for journal in PRESETS:
-            if slug == journal.slug or norm == normalize_title(journal.name):
-                if self.config.issn and self.config.issn != journal.issn:
-                    raise ActionRequired("填写的 ISSN 与所选期刊不一致，请清空高级设置里的 ISSN。")
-                return journal
+        journal = local_journal(self.config.url)
+        if journal:
+            if self.config.issn and self.config.issn != journal.issn:
+                raise ActionRequired("填写的 ISSN 与所选期刊不一致，请清空高级设置里的 ISSN。")
+            return journal
         self.emit(kind="phase", text="正在识别期刊…")
+        if re.fullmatch(r"\d{7}[\dX]", slug):
+            issn = slug[:4] + "-" + slug[4:]
+            if not valid_issn(issn) or (self.config.issn and self.config.issn != issn):
+                raise ActionRequired("期刊地址中的 ISSN 无效或与高级设置不一致。")
+            item = self.public_json("https://api.crossref.org/journals/" + issn)["message"]
+            return Journal(item["title"], slug, issn, self.config.url)
         if self.config.issn:
             item = self.public_json("https://api.crossref.org/journals/" + self.config.issn)["message"]
             if normalize_title(item.get("title", "")) != norm:
@@ -619,6 +635,10 @@ class Downloader:
             save_json(self.state / "journal.json", {"name": self.journal.name, "issn": self.journal.issn, "url": self.journal.url})
             self.log(f"期刊：{self.journal.name} · ISSN {self.journal.issn}")
             self.log("Elsevier 网络：" + ("直连（不使用系统 HTTP 代理）" if self.config.network == "direct" else "系统代理"))
+            from library_inventory import scan_existing
+            self.emit(kind="phase", text="正在读取保存位置中已有的 XML…")
+            self.inventory = scan_existing(self.base, checkpoint=self.control.checkpoint)
+            self.log(f"本地 XML 校验：{len(self.inventory['saved'])} 篇完整，{self.inventory['invalid']} 个文件未通过检查。")
             self.records = self.collect()
             save_lines(self.state / "manifest.jsonl", self.records)
             self.latest = latest_log(self.state / "download_log.jsonl")
@@ -637,7 +657,22 @@ class Downloader:
             self.control.checkpoint()
             if index % 10 == 0:
                 self.emit(kind="phase", text=f"正在校验已有文件… {index}/{total}")
-            found = verify_saved(self.base, row)
+            found = None
+            existing = getattr(self, "inventory", {}).get("saved", {}).get(row["doi"])
+            if existing:
+                from library_inventory import read_xml
+                try:
+                    # Check again at use time: the list query may have taken a while.
+                    checked = read_xml(Path(existing["path"]))
+                    if checked["doi"] == row["doi"]:
+                        found = {**checked, "file": existing["file"]}
+                        checksum = sidecar_path(Path(existing["path"]))
+                        if not existing_sidecar(Path(existing["path"])).exists():
+                            atomic_bytes(checksum, (checked["sha256"] + "\n").encode("ascii"))
+                except (OSError, ValueError):
+                    pass
+            if not found:
+                found = verify_saved(self.base, row)
             if found:
                 self.saved[row["doi"]] = found
         self.reused = len(self.saved)

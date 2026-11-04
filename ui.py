@@ -8,7 +8,8 @@ from PIL import Image, ImageDraw
 
 from controller import Controller, SETTINGS_DIR
 from update_ui import UpdateUI
-from engine import PRESETS, VERSION, load_json, parse_journal_url
+from catalog_ui import CatalogUI
+from engine import PRESETS, VERSION, load_json, parse_journal_url, local_journal
 
 BG = "#F4F7FA"
 WHITE = "#FFFFFF"
@@ -21,8 +22,8 @@ LINE = "#E5ECF1"
 FONT = "Microsoft YaHei UI"
 
 
-class App(ctk.CTk, Controller, UpdateUI):
-    def __init__(self, *, check_updates=True, remember_credentials=True):
+class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
+    def __init__(self, *, check_updates=True, remember_credentials=True, scan_libraries=True):
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
         super().__init__(fg_color=BG)
@@ -40,6 +41,7 @@ class App(ctk.CTk, Controller, UpdateUI):
         self.advanced_window = None
         self.pdf_window = None
         self.use_key_store = remember_credentials
+        self.scan_libraries = scan_libraries
         self.settings = load_json(SETTINGS_DIR / "settings.json", {})
         if not isinstance(self.settings, dict):
             self.settings = {}
@@ -49,6 +51,7 @@ class App(ctk.CTk, Controller, UpdateUI):
         self.bold_font = ctk.CTkFont(FONT, 15, weight="bold")
         self._layout()
         self._select_from_url()
+        self._init_library_watch()
         self._report_update_result()
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.after(120, self._poll)
@@ -148,7 +151,13 @@ class App(ctk.CTk, Controller, UpdateUI):
             border_color="#B5C5D1", fg_color=TEAL, hover_color=TEAL_HOVER, text_color=MUTED, font=self.small_font)
         self.visibility.grid(row=0, column=1)
 
-        self.label(form, "选择期刊", font=self.bold_font).grid(row=3, column=0, sticky="w", padx=24)
+        journal_head = ctk.CTkFrame(form, fg_color="transparent")
+        journal_head.grid(row=3, column=0, sticky="ew", padx=24)
+        self.label(journal_head, "选择期刊", font=self.bold_font).pack(side="left")
+        self.catalog_button = self.editable(ctk.CTkButton(journal_head, text="检索全部期刊  ›",
+            command=self._catalog_dialog, width=130, height=28, corner_radius=8, fg_color=PALE,
+            hover_color="#D3EEEE", text_color=TEAL, font=self.small_font))
+        self.catalog_button.pack(side="right")
         self.switch = self.editable(ctk.CTkSegmentedButton(form, values=["RSE", "ISPRS", "自定义期刊"],
             variable=self.preset, command=self._on_preset, height=38, corner_radius=10, border_width=4,
             fg_color="#F0F4F7", selected_color=TEAL, selected_hover_color=TEAL_HOVER,
@@ -163,7 +172,7 @@ class App(ctk.CTk, Controller, UpdateUI):
         self.url_entry = self.entry(form, self.url, placeholder_text="粘贴 ScienceDirect 期刊主页地址")
         self.url_entry.grid(row=6, column=0, sticky="ew", padx=24)
         self.url_entry.bind("<FocusOut>", lambda event: self._select_from_url())
-        self.label(form, "支持 /journal/期刊名称 或含 pub= 的检索网址", font=self.small_font, color=MUTED).grid(row=7, column=0, sticky="w", padx=25, pady=(5, 17))
+        self.label(form, "常用期刊快捷切换；其他期刊可检索目录或粘贴地址", font=self.small_font, color=MUTED).grid(row=7, column=0, sticky="w", padx=25, pady=(5, 17))
 
         line = ctk.CTkFrame(form, fg_color="transparent")
         line.grid(row=8, column=0, sticky="ew", padx=24)
@@ -185,10 +194,12 @@ class App(ctk.CTk, Controller, UpdateUI):
 
         self.label(form, "保存位置", font=self.bold_font).grid(row=12, column=0, sticky="w", padx=24)
         folder = ctk.CTkFrame(form, fg_color="transparent")
-        folder.grid(row=13, column=0, sticky="ew", padx=24, pady=(7, 22))
+        folder.grid(row=13, column=0, sticky="ew", padx=24, pady=(7, 6))
         folder.grid_columnconfigure(0, weight=1)
-        self.entry(folder, self.output).grid(row=0, column=0, sticky="ew", padx=(9, 10))
+        self.entry(folder, self.output).grid(row=0, column=0, sticky="ew", padx=(0, 10))
         self.editable(self.secondary(folder, "选择", self._browse, width=62)).grid(row=0, column=1)
+        self.label(form, textvariable=self.local_hint, font=self.small_font, color=TEAL,
+            wraplength=500, justify="left").grid(row=14, column=0, sticky="w", padx=25, pady=(0, 18))
 
         right = ctk.CTkFrame(content, fg_color="transparent", width=290)
         right.grid(row=0, column=1, sticky="nsew", pady=(0, 14))
@@ -239,6 +250,15 @@ class App(ctk.CTk, Controller, UpdateUI):
         footer = ctk.CTkFrame(self, fg_color=WHITE, corner_radius=0, height=80)
         footer.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         footer.grid_columnconfigure(0, weight=1)
+        pdf_info = ctk.CTkFrame(footer, fg_color="transparent")
+        pdf_info.grid(row=0, column=0, sticky="ew", padx=(26, 22), pady=14)
+        pdf_info.grid_columnconfigure(0, weight=1)
+        self.label(pdf_info, textvariable=self.pdf_status, font=self.small_font, color=TEAL,
+            wraplength=280).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self.pdf_progress = ctk.CTkProgressBar(pdf_info, height=6, width=180, corner_radius=3,
+            fg_color="#EAF0F4", progress_color=TEAL)
+        self.pdf_progress.set(0)
+        self.pdf_progress.grid(row=1, column=0, sticky="ew")
         self.secondary(footer, "打开文件夹", self.open_folder, width=100).grid(row=0, column=1, padx=(0, 8))
         self.pdf_button = self.editable(self.secondary(footer, "合成 PDF", self._pdf_dialog, width=110))
         self.pdf_button.grid(row=0, column=2, padx=(0, 8))
@@ -318,12 +338,11 @@ class App(ctk.CTk, Controller, UpdateUI):
 
     def _select_from_url(self):
         try:
-            slug, _ = parse_journal_url(self.url.get())
-            journal = next((j for j in PRESETS if j.slug == slug), None)
-        except ValueError:
+            journal = local_journal(self.url.get())
+        except (ValueError, OSError):
             journal = None
         self.preset.set("RSE" if journal == PRESETS[0] else "ISPRS" if journal == PRESETS[1] else "自定义期刊")
-        self.journal_label.configure(text=journal.name if journal else "粘贴期刊主页，程序会自动识别期刊。")
+        self.journal_label.configure(text=journal.name if journal else "检索期刊目录，或粘贴期刊主页地址。")
 
     def _on_preset(self, value):
         journal = PRESETS[0] if value == "RSE" else PRESETS[1] if value == "ISPRS" else None
