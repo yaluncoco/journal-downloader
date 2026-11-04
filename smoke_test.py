@@ -45,6 +45,10 @@ def run(output, online=False, pdf=False):
         assert app.percent.get() == "60%"
         app.destroy()
         results["modern_ui_events"] = True
+        from updater import version_tuple, safe_url
+        assert version_tuple("v1.10.0") > version_tuple("1.9.9")
+        assert safe_url("https://github.com/yaluncoco/journal-downloader")
+        results["update_module_loaded"] = True
         with tempfile.TemporaryDirectory(prefix="journal-downloader-test-") as tmp:
             base = Path(tmp) / PRESETS[0].issn
             row = {"doi": "10.1016/j.demo.2024.123456", "year": 2024, "title": "Offline test", "date": "2024-01"}

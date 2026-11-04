@@ -11,9 +11,31 @@ from engine import Downloader, Config, PRESETS
 from smoke_test import cached_index, xml
 from ui import App
 from pdf_export import PdfConfig
+from updater import Release
 
 
 class ControllerTests(unittest.TestCase):
+    def test_update_dialog_shows_available_release(self):
+        app = App()
+        app.withdraw()
+        release = Release("v99.0.0", "", "", "", 100000, "")
+        try:
+            with patch("update_ui.Updater") as client:
+                client.return_value.latest.return_value = release
+                app._update_dialog()
+                app.update_window.withdraw()
+                app.worker.join(5)
+                app._poll()
+            self.assertEqual(app.status.get(), "发现新版本")
+            self.assertIn("v99.0.0", app.update_message.get())
+            self.assertEqual(app.update_action.cget("state"), "normal")
+            self.assertEqual(app.update_button.cget("state"), "normal")
+            app._close_update()
+        finally:
+            for callback in app.tk.call("after", "info"):
+                app.tk.call("after", "cancel", callback)
+            app.destroy()
+
     def test_pdf_worker_completion_and_pending(self):
         class FakeExporter:
             def __init__(self, cfg, emit, control):

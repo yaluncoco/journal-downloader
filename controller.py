@@ -65,6 +65,7 @@ class Controller:
         self.start_button.configure(state="disabled" if busy else "normal")
         self.pause_button.configure(state="normal" if busy else "disabled", text="暂停")
         self.stop_button.configure(state="normal" if busy else "disabled")
+        self.update_button.configure(state="disabled" if busy else "normal")
 
     def start(self):
         if self.worker and self.worker.is_alive():
@@ -219,6 +220,9 @@ class Controller:
             kind = event["kind"]
             if kind == "log":
                 self._log(event["text"])
+            elif kind in ("update_result", "update_progress"):
+                if self._update_event(event):
+                    return
             elif kind == "library":
                 self.library = Path(event["path"])
                 self._log("保存目录：" + event["path"])

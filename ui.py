@@ -7,6 +7,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from controller import Controller, SETTINGS_DIR
+from update_ui import UpdateUI
 from engine import PRESETS, VERSION, load_json, parse_journal_url
 
 BG = "#F4F7FA"
@@ -20,7 +21,7 @@ LINE = "#E5ECF1"
 FONT = "Microsoft YaHei UI"
 
 
-class App(ctk.CTk, Controller):
+class App(ctk.CTk, Controller, UpdateUI):
     def __init__(self):
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
@@ -47,6 +48,7 @@ class App(ctk.CTk, Controller):
         self.bold_font = ctk.CTkFont(FONT, 15, weight="bold")
         self._layout()
         self._select_from_url()
+        self._report_update_result()
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.after(120, self._poll)
         self.after(220, self._set_icon)
@@ -95,6 +97,10 @@ class App(ctk.CTk, Controller):
         self.label(header, "把文献收集交给工具，把时间留给研究。", font=self.small_font, color=MUTED).grid(row=1, column=1, sticky="w", pady=(3, 0))
         ctk.CTkLabel(header, text="XML  +  PDF", text_color=TEAL, fg_color=PALE,
                     corner_radius=10, font=self.small_font, width=116, height=30).grid(row=0, column=2, rowspan=2)
+        self.update_button = ctk.CTkButton(header, text="更新", width=56, height=30, corner_radius=9,
+            font=self.small_font, fg_color="transparent", hover_color="#E5EEF2", text_color=MUTED,
+            command=self._update_dialog)
+        self.update_button.grid(row=0, column=3, rowspan=2, padx=(8, 0))
 
         content = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0,
             scrollbar_fg_color=BG, scrollbar_button_color="#CEDAE3", scrollbar_button_hover_color="#9AAEBD")

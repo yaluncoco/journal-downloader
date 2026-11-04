@@ -15,6 +15,8 @@
 
 PDF 合成需要电脑已安装 Microsoft Edge 或 Google Chrome。程序使用独立的后台浏览器进程，不需要打开浏览器窗口或安装 Python。
 
+右上角「更新」可手动检查 GitHub 正式版本；有新版时点击「下载并更新」。下载校验和新版自检通过后自动替换并重启，文库和设置保持原位置。
+
 支持的地址示例：
 
 ```text
@@ -38,6 +40,7 @@ https://www.sciencedirect.com/search?pub=Remote+Sensing+of+Environment&date=2024
 - 期刊双栏 / 舒适单栏排版，宽图表跨栏、长表格跨页、较长公式自动调整宽度。
 - 图片缓存解码与 SHA-256 校验；PDF 按 XML 哈希、版式、排版版本、文件哈希与可读取性校验后跳过。
 - 单篇缺图、XML 损坏或不支持的内容记录待处理，继续其他论文；再次合成可重试。
+- 紧凑的手动更新入口，下载 SHA-256 校验、新版启动自检、原程序备份及替换失败恢复。
 
 ## 范围说明
 
@@ -46,6 +49,8 @@ https://www.sciencedirect.com/search?pub=Remote+Sensing+of+Environment&date=2024
 全文由 Elsevier Article Retrieval API 提供，插图由 Object Retrieval API 提供。API Key、机构订阅及网络出口决定实际可访问范围。本程序不绕过访问控制。
 
 PDF 是依据 XML 和图片重新排版的阅读版，标有来源说明；不是出版社官方 PDF，不能保证相同字体、分页或图表位置。rawtext / 仅摘要 XML 不会被标为完整图文 PDF，需保留为待处理；补充附件不嵌入 PDF。TXT 的公式、表格和排版可能失真。
+
+IEEE 接口目前处于验证阶段，尚未启用下载入口。测试账号仍待审批，首次请求返回 `403 Developer Inactive`；格式与权限说明见 [IEEE 接口核对](IEEE接口说明.md)。
 
 ## 从源码运行
 
@@ -60,7 +65,7 @@ python -m venv .build-env
 ## 测试与构建
 
 ```powershell
-.\.build-env\Scripts\python.exe -m unittest -v test_engine test_controller test_pdf
+.\.build-env\Scripts\python.exe -m unittest -v test_engine test_controller test_pdf test_updater
 .\build.ps1
 ```
 
@@ -95,7 +100,8 @@ EXE 输出到 `release/JournalDownloader.exe`。XML 下载引擎使用 Python �
 | `pdf_assets.py` | 图片对象获取、重试与缓存校验 |
 | `pdf_document.py` | XML、CALS 表格、MathML 到安全排版 HTML |
 | `pdf_export.py` | PDF 批量合成、后台浏览器和断点校验 |
-| `test_engine.py`、`test_controller.py`、`test_pdf.py` | 引擎、界面控制器和 PDF 流程测试 |
+| `updater.py`、`update_ui.py` | 手动检查版本、校验下载、替换及失败恢复 |
+| `test_engine.py`、`test_controller.py`、`test_pdf.py`、`test_updater.py` | 引擎、界面、PDF 和更新流程测试 |
 | `smoke_test.py` | 打包程序自检 |
 
 仓库不包含 API Key、用户配置或下载的论文全文。运行产生的文库、日志和构建产物已加入忽略规则。
