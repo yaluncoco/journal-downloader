@@ -24,3 +24,11 @@ fulltext_txt/
 review_required/
 indexes/
 调试报告.md
+output/
+tmp/
+fulltext_pdf/
+pdf_log.jsonl
+pdf_pending.jsonl
+pdf_summary.json
+.image-cache/
+.work/

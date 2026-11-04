@@ -20,7 +20,7 @@ def cached_index(base, rows, issn=PRESETS[0].issn):
         "years": [2024, 2024], "created_at": "offline fixture", "records": rows})
 
 
-def run(output, online=False):
+def run(output, online=False, pdf=False):
     results = {}
     try:
         import tkinter as tk
@@ -73,6 +73,25 @@ def run(output, online=False):
                 if path.is_file():
                     assert config.api_key.encode() not in path.read_bytes()
             results["no_credential_on_disk"] = True
+            if pdf:
+                from pdf_export import PdfConfig, PdfExporter
+                pdf_xml = Path(tmp) / "pdf-fixture" / "2024"
+                pdf_xml.mkdir(parents=True)
+                data = xml().replace(b'<dc:title>Offline test article</dc:title>',
+                    b'<dc:title>Offline test article</dc:title><prism:coverDate>2024-01-01</prism:coverDate>')
+                data = data.replace(b'<article><body>',
+                    b'<article><head><title>Offline test article</title></head><body>')
+                (pdf_xml / "sample.xml").write_bytes(data)
+                pdf_cfg = PdfConfig(source=pdf_xml.parent, output=Path(tmp) / "pdf-output")
+                first = PdfExporter(pdf_cfg).run()
+                assert first["saved"] == 1 and first["pending"] == 0
+                second = PdfExporter(pdf_cfg).run()
+                assert second["reused"] == 1
+                pdf_file = next(pdf_cfg.output.rglob("*.pdf"))
+                pdf_file.write_bytes(b"truncated PDF")
+                third = PdfExporter(pdf_cfg).run()
+                assert third["saved"] == 1 and third["reused"] == 0
+                results["pdf_render_resume_repair"] = True
             if online:
                 results["online_metadata"] = []
                 for journal in PRESETS:

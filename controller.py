@@ -26,6 +26,8 @@ class Controller:
         self.detail = tk.StringVar(value="填入 API Key，选择期刊与年份，然后开始下载。")
         self.metrics = {name: tk.StringVar(value="—") for name in ("total", "saved", "reused", "pending")}
         self.percent = tk.StringVar(value="0%")
+        self.saved_caption = tk.StringVar(value="已保存全文")
+        self.active_job = "xml"
 
     def editable(self, widget, state="normal"):
         self.mutable.append((widget, state))
@@ -86,6 +88,8 @@ class Controller:
             messagebox.showerror("请检查下载设置", str(error), parent=self)
             return
         self.library = None
+        self.active_job = "xml"
+        self.saved_caption.set("已保存全文")
         self.stages = ""
         self.control = Control()
         self._busy(True)
@@ -118,6 +122,60 @@ class Controller:
             outcome, text = "error", f"{type(error).__name__}：{error}。请检查保存位置、网络后重试。"
         finally:
             text = text.replace(cfg.api_key, "[已隐藏]") if cfg.api_key else text
+            self.events.put({"kind": "done", "outcome": outcome, "text": text})
+            if runner:
+                runner.key = ""
+            cfg.api_key = ""
+
+    def start_pdf(self, source, layout="double"):
+        if self.worker and self.worker.is_alive():
+            return
+        from pdf_export import PdfConfig, PdfExporter
+        try:
+            if not source.strip():
+                raise ValueError("请选择含已下载 XML 的文库文件夹。")
+            cfg = PdfConfig(source=Path(source).expanduser().resolve(), api_key=self.key.get().strip(),
+                            network="direct" if self.direct.get() else "system",
+                            start_year=int(self.start_year.get()), end_year=int(self.end_year.get()),
+                            layout=layout)
+            cfg.validate()
+        except (ValueError, OSError) as error:
+            messagebox.showerror("请检查 PDF 设置", str(error), parent=self)
+            return
+        if getattr(self, "pdf_window", None) and self.pdf_window.winfo_exists():
+            self.pdf_window.destroy()
+        self.active_job = "pdf"
+        self.saved_caption.set("已合成 PDF")
+        self.stages = ""
+        self.control = Control()
+        self._busy(True)
+        for variable in self.metrics.values():
+            variable.set("—")
+        self.progress.configure(mode="indeterminate")
+        self.progress.set(0)
+        self.progress.start()
+        self.percent.set("准备中")
+        self.status.set("准备合成 PDF")
+        self.detail.set("扫描现有 XML，校验 PDF 与图片缓存…")
+        self._log(f"开始合成 PDF：{cfg.start_year}–{cfg.end_year} 年，{'双栏' if layout == 'double' else '单栏'}排版。")
+        self.worker = threading.Thread(target=self._pdf_work, args=(cfg, PdfExporter), daemon=False)
+        self.worker.start()
+
+    def _pdf_work(self, cfg, factory):
+        runner = None
+        outcome, text = "complete", "PDF 合成结束。"
+        try:
+            runner = factory(cfg, emit=lambda **event: self.events.put(event), control=self.control)
+            runner.run()
+        except Cancelled:
+            outcome, text = "stopped", "已停止合成。再次开始会校验 PDF 并复用已缓存图片。"
+        except ActionRequired as error:
+            outcome, text = "action_required", str(error)
+        except Exception as error:
+            outcome, text = "error", f"{type(error).__name__}：{error}"
+        finally:
+            if cfg.api_key:
+                text = text.replace(cfg.api_key, "[已隐藏]")
             self.events.put({"kind": "done", "outcome": outcome, "text": text})
             if runner:
                 runner.key = ""
@@ -183,7 +241,17 @@ class Controller:
                 outcome = event["outcome"]
                 text = event["text"]
                 if outcome == "complete":
-                    if self.stages == "finished_with_pending":
+                    if self.active_job == "pdf":
+                        if self.stages == "pdf_finished_with_pending":
+                            self.status.set("合成结束 · 部分待处理")
+                            text = "部分 XML 或图片需要检查，详见 pdf_pending.jsonl；再次合成会重试并跳过完整 PDF。"
+                        elif self.metrics["total"].get() == "0":
+                            self.status.set("未找到 XML")
+                            text = "所选文件夹和年份范围内未找到 XML，请选择已有文库或 fulltext_xml 文件夹。"
+                        else:
+                            self.status.set("PDF 合成完成")
+                            text = "PDF 已保存并通过校验。点击「打开文件夹」查看；生成文件为 XML 重排阅读版。"
+                    elif self.stages == "finished_with_pending":
                         self.status.set("已结束 · 部分条目待处理")
                         text = "未保存的条目见 pending.jsonl；可勾选「重新尝试」后再次开始。"
                     elif self.metrics["total"].get() == "0":
@@ -205,7 +273,7 @@ class Controller:
         if self.worker and self.worker.is_alive():
             self.closing = True
             self.stop()
-            self.detail.set("正在安全结束下载并关闭窗口，请稍候…")
+            self.detail.set("正在安全结束任务并关闭窗口，请稍候…")
         else:
             self.key.set("")
             self.destroy()

@@ -10,9 +10,36 @@ import controller
 from engine import Downloader, Config, PRESETS
 from smoke_test import cached_index, xml
 from ui import App
+from pdf_export import PdfConfig
 
 
 class ControllerTests(unittest.TestCase):
+    def test_pdf_worker_completion_and_pending(self):
+        class FakeExporter:
+            def __init__(self, cfg, emit, control):
+                self.key, self.emit = cfg.api_key, emit
+
+            def run(self):
+                self.emit(kind="counts", total=2, saved=1, reused=1, pending=1,
+                          stage="pdf_finished_with_pending")
+
+        app = App()
+        app.withdraw()
+        try:
+            app.active_job = "pdf"
+            cfg = PdfConfig(Path.cwd(), api_key="PRIVATE_PDF_TEST_KEY")
+            app._pdf_work(cfg, FakeExporter)
+            app._poll()
+            self.assertEqual(app.status.get(), "合成结束 · 部分待处理")
+            self.assertEqual(app.metrics["saved"].get(), "1")
+            self.assertEqual(cfg.api_key, "")
+            self.assertEqual(app.pdf_button.cget("state"), "normal")
+            self.assertIn("pdf_pending.jsonl", app.detail.get())
+        finally:
+            for callback in app.tk.call("after", "info"):
+                app.tk.call("after", "cancel", callback)
+            app.destroy()
+
     def test_worker_settings_and_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -50,6 +77,8 @@ class ControllerTests(unittest.TestCase):
                 if app.worker and app.worker.is_alive():
                     app.control.stop.set()
                     app.worker.join(5)
+                for callback in app.tk.call("after", "info"):
+                    app.tk.call("after", "cancel", callback)
                 app.destroy()
 
 

@@ -37,6 +37,7 @@ class App(ctk.CTk, Controller):
         self.mutable = []
         self.stages = ""
         self.advanced_window = None
+        self.pdf_window = None
         self.settings = load_json(SETTINGS_DIR / "settings.json", {})
         if not isinstance(self.settings, dict):
             self.settings = {}
@@ -92,7 +93,7 @@ class App(ctk.CTk, Controller):
             ctk.CTkLabel(header, text="", image=self.logo, width=48).grid(row=0, column=0, rowspan=2, padx=(0, 14))
         self.label(header, "期刊全文下载器", font=ctk.CTkFont(FONT, 26, weight="bold")).grid(row=0, column=1, sticky="w")
         self.label(header, "把文献收集交给工具，把时间留给研究。", font=self.small_font, color=MUTED).grid(row=1, column=1, sticky="w", pady=(3, 0))
-        ctk.CTkLabel(header, text="XML  /  全文下载", text_color=TEAL, fg_color=PALE,
+        ctk.CTkLabel(header, text="XML  +  PDF", text_color=TEAL, fg_color=PALE,
                     corner_radius=10, font=self.small_font, width=116, height=30).grid(row=0, column=2, rowspan=2)
 
         content = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0,
@@ -172,7 +173,7 @@ class App(ctk.CTk, Controller):
         big = ctk.CTkFrame(progress, fg_color="transparent")
         big.grid(row=1, column=0, sticky="ew", padx=20)
         self.label(big, "", textvariable=self.metrics["saved"], font=ctk.CTkFont("Segoe UI", 42, weight="bold"), color=INK).pack(side="left")
-        self.label(big, "已保存全文", font=self.small_font, color=MUTED).pack(side="left", padx=12, pady=(22, 0))
+        self.label(big, "", textvariable=self.saved_caption, font=self.small_font, color=MUTED).pack(side="left", padx=12, pady=(22, 0))
         self.progress = ctk.CTkProgressBar(progress, height=7, corner_radius=4, fg_color="#EAF0F4", progress_color=TEAL)
         self.progress.set(0)
         self.progress.grid(row=2, column=0, sticky="ew", padx=20, pady=(12, 7))
@@ -208,17 +209,66 @@ class App(ctk.CTk, Controller):
         footer = ctk.CTkFrame(self, fg_color=WHITE, corner_radius=0, height=80)
         footer.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         footer.grid_columnconfigure(0, weight=1)
-        self.label(footer, f"v{VERSION}   ·   XML + TXT\n不自动下载独立图片", font=self.small_font, color=MUTED,
+        self.label(footer, f"v{VERSION}   ·   XML + TXT + PDF\n高清图表 · 期刊式排版", font=self.small_font, color=MUTED,
             justify="left").grid(row=0, column=0, sticky="w", padx=30, pady=16)
-        self.secondary(footer, "打开文件夹", self.open_folder, width=115).grid(row=0, column=1, padx=(0, 10))
+        self.secondary(footer, "打开文件夹", self.open_folder, width=100).grid(row=0, column=1, padx=(0, 8))
+        self.pdf_button = self.editable(self.secondary(footer, "合成 PDF", self._pdf_dialog, width=110))
+        self.pdf_button.grid(row=0, column=2, padx=(0, 8))
         self.stop_button = self.secondary(footer, "停止", self.stop, width=70, state="disabled")
-        self.stop_button.grid(row=0, column=2, padx=(0, 10))
+        self.stop_button.grid(row=0, column=3, padx=(0, 8))
         self.pause_button = self.secondary(footer, "暂停", self.pause, width=70, state="disabled")
-        self.pause_button.grid(row=0, column=3, padx=(0, 12))
+        self.pause_button.grid(row=0, column=4, padx=(0, 10))
         self.start_button = ctk.CTkButton(footer, text="开始下载", command=self.start, height=44,
-            width=148, corner_radius=12, fg_color=TEAL, hover_color=TEAL_HOVER, text_color=WHITE,
+            width=130, corner_radius=12, fg_color=TEAL, hover_color=TEAL_HOVER, text_color=WHITE,
             font=self.bold_font)
-        self.start_button.grid(row=0, column=4, padx=(0, 30), pady=16)
+        self.start_button.grid(row=0, column=5, padx=(0, 24), pady=16)
+
+    def _pdf_dialog(self):
+        if self.worker and self.worker.is_alive():
+            return
+        if self.pdf_window and self.pdf_window.winfo_exists():
+            self.pdf_window.focus()
+            return
+        from tkinter import filedialog, StringVar
+        win = ctk.CTkToplevel(self, fg_color=BG)
+        self.pdf_window = win
+        win.title("合成阅读版 PDF")
+        win.geometry("610x480")
+        win.resizable(False, False)
+        win.transient(self)
+        win.grid_columnconfigure(0, weight=1)
+        self.label(win, "把 XML 变成可阅读的论文", font=ctk.CTkFont(FONT, 22, weight="bold")).grid(row=0, column=0, sticky="w", padx=28, pady=(26, 7))
+        self.label(win, "补齐高清图片，保留正文、公式、表格与参考文献。", font=self.small_font, color=MUTED).grid(row=1, column=0, sticky="w", padx=28)
+        card = self.card(win)
+        card.grid(row=2, column=0, sticky="ew", padx=26, pady=20)
+        card.grid_columnconfigure(0, weight=1)
+        initial = self.library or Path(self.output.get())
+        if initial.name == "fulltext_pdf":
+            initial = initial.parent
+        folder_var = StringVar(value=str(initial))
+        layout_var = StringVar(value="期刊双栏")
+        self.label(card, "已有 XML 文库", font=self.bold_font).grid(row=0, column=0, sticky="w", padx=20, pady=(18, 8))
+        folder_row = ctk.CTkFrame(card, fg_color="transparent")
+        folder_row.grid(row=1, column=0, sticky="ew", padx=20)
+        folder_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkEntry(folder_row, textvariable=folder_var, height=42, corner_radius=10,
+                     border_width=1, border_color=LINE, font=self.body_font).grid(row=0, column=0, sticky="ew", padx=(0, 10))
+        def browse():
+            value = filedialog.askdirectory(parent=win, title="选择文库或 fulltext_xml 文件夹",
+                                            initialdir=folder_var.get() if Path(folder_var.get()).exists() else str(Path.home()))
+            if value:
+                folder_var.set(value)
+        self.secondary(folder_row, "选择", browse, width=65).grid(row=0, column=1)
+        self.label(card, f"年份沿用主界面：{self.start_year.get()} — {self.end_year.get()}", font=self.small_font, color=MUTED).grid(row=2, column=0, sticky="w", padx=20, pady=(7, 17))
+        ctk.CTkSegmentedButton(card, values=["期刊双栏", "舒适单栏"], variable=layout_var,
+            height=40, corner_radius=10, border_width=4, fg_color="#F0F4F7",
+            selected_color="#D3EEEE", selected_hover_color="#BFE4E5", unselected_color="#F0F4F7",
+            unselected_hover_color="#E0E9EF", text_color=INK, font=self.body_font).grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 20))
+        self.label(win, "使用主界面的 API Key 与网络设置；完整 PDF 会校验后跳过。\n输出到文库的 fulltext_pdf 文件夹。需要已安装 Edge 或 Chrome。\n生成的是 XML 重排阅读版，分页和细节可能与官方 PDF 不同。", font=self.small_font,
+                   color=MUTED, justify="left", wraplength=550).grid(row=3, column=0, sticky="w", padx=28)
+        ctk.CTkButton(win, text="开始合成", height=44, width=140, corner_radius=12,
+            fg_color=TEAL, hover_color=TEAL_HOVER, font=self.bold_font,
+            command=lambda: self.start_pdf(folder_var.get(), "double" if layout_var.get() == "期刊双栏" else "single")).grid(row=4, column=0, sticky="e", padx=28, pady=22)
 
     def year_control(self, parent, variable):
         frame = ctk.CTkFrame(parent, fg_color="#F7F9FB", corner_radius=10, border_width=1, border_color=LINE)
