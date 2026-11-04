@@ -4,7 +4,7 @@ import queue
 import sys
 
 import customtkinter as ctk
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from controller import Controller, SETTINGS_DIR
 from update_ui import UpdateUI
@@ -22,7 +22,7 @@ FONT = "Microsoft YaHei UI"
 
 
 class App(ctk.CTk, Controller, UpdateUI):
-    def __init__(self):
+    def __init__(self, *, check_updates=True):
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
         super().__init__(fg_color=BG)
@@ -53,6 +53,8 @@ class App(ctk.CTk, Controller, UpdateUI):
         self.after(120, self._poll)
         self.after(220, self._set_icon)
         self.after(30, self._fit_screen)
+        if check_updates:
+            self.after(1500, self._start_update_notice)
 
     def _set_icon(self):
         if (self.assets / "app.ico").exists():
@@ -97,10 +99,21 @@ class App(ctk.CTk, Controller, UpdateUI):
         self.label(header, "把文献收集交给工具，把时间留给研究。", font=self.small_font, color=MUTED).grid(row=1, column=1, sticky="w", pady=(3, 0))
         ctk.CTkLabel(header, text="XML  +  PDF", text_color=TEAL, fg_color=PALE,
                     corner_radius=10, font=self.small_font, width=116, height=30).grid(row=0, column=2, rowspan=2)
-        self.update_button = ctk.CTkButton(header, text="更新", width=56, height=30, corner_radius=9,
-            font=self.small_font, fg_color="transparent", hover_color="#E5EEF2", text_color=MUTED,
+        update_tools = ctk.CTkFrame(header, width=36, height=36, fg_color="transparent")
+        update_tools.grid(row=0, column=3, rowspan=2, padx=(8, 0))
+        arrow = Image.new("RGBA", (72, 72))
+        draw = ImageDraw.Draw(arrow)
+        draw.line([(36, 55), (36, 16)], fill=TEAL, width=7)
+        draw.line([(18, 34), (36, 16), (54, 34)], fill=TEAL, width=7, joint="curve")
+        self.update_icon = ctk.CTkImage(arrow, size=(24, 24))
+        self.update_button = ctk.CTkButton(update_tools, text="", image=self.update_icon,
+            width=36, height=36, corner_radius=10, fg_color="#EAF5F5", hover_color="#D8ECEE",
             command=self._update_dialog)
-        self.update_button.grid(row=0, column=3, rowspan=2, padx=(8, 0))
+        self.update_button.grid(row=0, column=0)
+        self.update_badge = ctk.CTkFrame(update_tools, width=8, height=8, corner_radius=4,
+            fg_color="#E34D59", border_width=0)
+        self.update_badge.bind("<Button-1>", lambda event: self._update_dialog())
+        self.update_available = False
 
         content = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0,
             scrollbar_fg_color=BG, scrollbar_button_color="#CEDAE3", scrollbar_button_hover_color="#9AAEBD")
@@ -159,9 +172,17 @@ class App(ctk.CTk, Controller, UpdateUI):
         self.label(years, "—", color=MUTED).pack(side="left", padx=16)
         self.year_control(years, self.end_year).pack(side="left")
 
-        self.label(form, "保存位置", font=self.bold_font).grid(row=10, column=0, sticky="w", padx=24)
+        quantity = ctk.CTkFrame(form, fg_color="transparent")
+        quantity.grid(row=10, column=0, sticky="ew", padx=24, pady=(0, 4))
+        self.label(quantity, "本次下载", font=self.bold_font).pack(side="left", padx=(0, 16))
+        self.entry(quantity, self.max_downloads, width=96, justify="center").pack(side="left")
+        self.label(quantity, "篇", color=MUTED).pack(side="left", padx=10)
+        self.label(form, "0 表示不限；已有完整文件和失败请求不计入数量", font=self.small_font,
+            color=MUTED, wraplength=440).grid(row=11, column=0, sticky="w", padx=25, pady=(0, 16))
+
+        self.label(form, "保存位置", font=self.bold_font).grid(row=12, column=0, sticky="w", padx=24)
         folder = ctk.CTkFrame(form, fg_color="transparent")
-        folder.grid(row=11, column=0, sticky="ew", padx=24, pady=(7, 22))
+        folder.grid(row=13, column=0, sticky="ew", padx=24, pady=(7, 22))
         folder.grid_columnconfigure(0, weight=1)
         self.entry(folder, self.output).grid(row=0, column=0, sticky="ew", padx=(9, 10))
         self.editable(self.secondary(folder, "选择", self._browse, width=62)).grid(row=0, column=1)

@@ -81,6 +81,90 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(row["title"], "A & B")
         self.assertIsNone(e.metadata_record(item, 2023, 2023))
 
+    def test_download_limit_validation(self):
+        for value in (-1, 1.5, True, "10", None):
+            self.cfg.max_downloads = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.cfg.validate()
+        for value in (0, 1, 1000):
+            self.cfg.max_downloads = value
+            self.cfg.validate()
+
+    def test_limit_counts_successes_and_preserves_resume_manifest(self):
+        rows = [{**self.row, "doi": f"10.1016/j.test.2024.limit{i}"} for i in range(5)]
+        cached_index(self.base, rows)
+        target, txt, _ = e.paths_for(self.base, rows[0])
+        e.save_fulltext(target, txt, xml(rows[0]["doi"]), rows[0]["doi"])
+        corrupt, _, _ = e.paths_for(self.base, rows[1])
+        corrupt.write_bytes(b"<broken")
+        self.cfg.max_downloads = 2
+        calls = []
+        def fetch(doi):
+            calls.append(doi)
+            return xml(doi, body=doi != rows[2]["doi"]), {"http": 200}
+        runner = self.runner()
+        runner.fetch = fetch
+        runner.run()
+        self.assertEqual(calls, [row["doi"] for row in rows[1:4]])
+        self.assertEqual((runner.new_count, runner.reused, len(runner.saved)), (2, 1, 3))
+        summary = e.load_json(self.base / "download_summary.json")
+        self.assertEqual(summary["stage"], "limit_reached")
+        self.assertEqual(summary["pending"], 2)
+        self.assertEqual(len((self.base / "manifest.jsonl").read_text().splitlines()), 5)
+        self.assertIsNotNone(e.verify_saved(self.base, rows[1]))
+        calls.clear()
+        resumed = self.runner()
+        resumed.fetch = fetch
+        resumed.run()
+        self.assertEqual(calls, [rows[4]["doi"]])
+        self.assertEqual((resumed.new_count, resumed.reused), (1, 3))
+        self.assertEqual(e.load_json(self.base / "download_summary.json")["stage"], "finished_with_pending")
+
+    def test_limit_finishes_before_quota_wait(self):
+        rows = [self.row, {**self.row, "doi": "10.1016/j.test.2024.second"}]
+        cached_index(self.base, rows)
+        self.cfg.max_downloads = 1
+        deadline = time.time() + 3600
+        runner = self.runner()
+        runner.control.wait = lambda *a, **kw: self.fail("Limit reached: must not wait for the next request")
+        runner.fetch = lambda doi: (xml(doi), {"http": 200, "remaining": "0", "quota_reset_epoch": str(deadline)})
+        runner.run()
+        self.assertEqual(runner.new_count, 1)
+        self.assertEqual(e.load_json(self.base / "server_pause.json")["deadline"], deadline)
+
+    def test_limit_leaves_deferred_network_failures_for_next_run(self):
+        rows = [{**self.row, "doi": f"10.1016/j.test.2024.net{i}"} for i in range(3)]
+        cached_index(self.base, rows)
+        self.cfg.max_downloads = 1
+        runner = self.runner()
+        calls = []
+        def fetch(doi):
+            calls.append(doi)
+            return (None, {"status": "network_error"}) if doi == rows[0]["doi"] else (xml(doi), {"http": 200})
+        runner.fetch = fetch
+        runner.run()
+        self.assertEqual(calls, [rows[0]["doi"], rows[1]["doi"]])
+        self.assertEqual(runner.new_count, 1)
+        calls.clear()
+        resumed = self.runner()
+        resumed.fetch = lambda doi: (calls.append(doi) or xml(doi), {"http": 200})
+        resumed.run()
+        self.assertEqual(calls, [rows[0]["doi"]])
+        self.assertEqual((resumed.new_count, resumed.reused), (1, 1))
+
+    def test_zero_and_large_limits_download_available_records(self):
+        rows = [{**self.row, "doi": f"10.1016/j.test.2024.all{i}"} for i in range(3)]
+        for limit in (0, 10):
+            with self.subTest(limit=limit):
+                self.cfg.output = self.root / str(limit)
+                self.cfg.max_downloads = limit
+                cached_index(self.cfg.output / e.PRESETS[0].issn, rows)
+                runner = self.runner()
+                runner.fetch = lambda doi: (xml(doi), {"http": 200})
+                runner.run()
+                self.assertEqual(runner.new_count, 3)
+                self.assertEqual(e.load_json(runner.base / "download_summary.json")["stage"], "complete")
+
     def test_custom_journal_exact_resolution(self):
         self.cfg.url = "https://www.sciencedirect.com/journal/agricultural-and-forest-meteorology"
         r = self.runner()

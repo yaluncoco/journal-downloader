@@ -17,6 +17,7 @@ class Controller:
         self.url = tk.StringVar(value=self.settings.get("url", PRESETS[0].url))
         self.start_year = tk.StringVar(value=str(self.settings.get("start_year", 2024)))
         self.end_year = tk.StringVar(value=str(self.settings.get("end_year", 2027)))
+        self.max_downloads = tk.StringVar(value=str(self.settings.get("max_downloads", 0)))
         self.output = tk.StringVar(value=self.settings.get("output", str(Path.home() / "Documents" / "期刊全文下载")))
         self.direct = tk.BooleanVar(value=self.settings.get("network", "direct") != "system")
         self.issn = tk.StringVar(value=self.settings.get("issn", ""))
@@ -57,6 +58,7 @@ class Controller:
         save_json(SETTINGS_DIR / "settings.json", {
             "url": cfg.url, "start_year": cfg.start_year, "end_year": cfg.end_year,
             "output": str(cfg.output), "network": cfg.network, "issn": cfg.issn,
+            "max_downloads": cfg.max_downloads,
         })
 
     def _busy(self, busy):
@@ -77,10 +79,14 @@ class Controller:
                 start, end = int(self.start_year.get()), int(self.end_year.get())
             except ValueError:
                 raise ValueError("起止年份必须填写整数。") from None
+            try:
+                maximum = int(self.max_downloads.get().strip())
+            except ValueError:
+                raise ValueError("下载数量必须是非负整数，0 表示不限。") from None
             cfg = Config(api_key=self.key.get().strip(), url=self.url.get().strip(), start_year=start,
                          end_year=end, output=Path(self.output.get().strip()).expanduser().resolve(),
                          network="direct" if self.direct.get() else "system", issn=self.issn.get().strip().upper(),
-                         refresh=self.refresh_index.get(), retry_failed=self.retry_failed.get())
+                         refresh=self.refresh_index.get(), retry_failed=self.retry_failed.get(), max_downloads=maximum)
             cfg.validate()
             if self.advanced_window and self.advanced_window.winfo_exists():
                 self.advanced_window.destroy()
@@ -103,6 +109,7 @@ class Controller:
         self.status.set("正在准备")
         self.detail.set("正在识别期刊并建立论文列表…")
         self._log(f"开始任务：{start}–{end} 年。")
+        self._log(f"本次最多成功下载 {maximum} 篇；已保存的完整文件不计入。" if maximum else "下载数量不限。")
         if end > datetime.now().year:
             self._log("所选范围包含未来年份，只能获取目前已登记、已发布且有权限的内容。")
         self.worker = threading.Thread(target=self._work, args=(cfg, self.control), daemon=False)
@@ -220,6 +227,8 @@ class Controller:
             kind = event["kind"]
             if kind == "log":
                 self._log(event["text"])
+            elif kind == "update_notice":
+                self._update_notice_event(event)
             elif kind in ("update_result", "update_progress"):
                 if self._update_event(event):
                     return
@@ -234,8 +243,15 @@ class Controller:
             elif kind == "counts":
                 self.progress.stop()
                 self.progress.configure(mode="determinate")
-                self.progress.set(event["saved"] / max(1,event["total"]))
-                self.percent.set(f"{event['saved'] / event['total']:.0%}" if event["total"] else "—")
+                target = event.get("download_target", 0)
+                if event.get("max_downloads") and target:
+                    current = event["downloaded_this_run"]
+                    self.progress.set(min(1, current / target))
+                    self.percent.set(f"{current / target:.0%} · 本次 {current}/{target} 篇")
+                else:
+                    self.progress.set(event["saved"] / max(1,event["total"]))
+                    self.percent.set(f"{event['saved'] / event['total']:.0%}" if event["total"] else "—")
+                self.downloaded_this_run = event.get("downloaded_this_run", 0)
                 for name, variable in self.metrics.items():
                     variable.set(str(event[name]))
                 self.stages = event["stage"]
@@ -255,6 +271,9 @@ class Controller:
                         else:
                             self.status.set("PDF 合成完成")
                             text = "PDF 已保存并通过校验。点击「打开文件夹」查看；生成文件为 XML 重排阅读版。"
+                    elif self.stages == "limit_reached":
+                        self.status.set("已达到本次数量")
+                        text = f"本次成功下载 {self.downloaded_this_run} 篇。再次开始会跳过完整文件，继续下载剩余论文。"
                     elif self.stages == "finished_with_pending":
                         self.status.set("已结束 · 部分条目待处理")
                         text = "未保存的条目见 pending.jsonl；可勾选「重新尝试」后再次开始。"
@@ -274,6 +293,7 @@ class Controller:
         self.after(120, self._poll)
 
     def close(self):
+        self._cancel_update_notice()
         if self.worker and self.worker.is_alive():
             self.closing = True
             self.stop()

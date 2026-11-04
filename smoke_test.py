@@ -29,7 +29,7 @@ def run(output, online=False, pdf=False):
         results["tk"] = str(root.tk.call("info", "patchlevel"))
         root.destroy()
         from ui import App
-        app = App()
+        app = App(check_updates=False)
         app.withdraw()
         app.update_idletasks()
         app._on_preset("ISPRS")
@@ -43,6 +43,13 @@ def run(output, online=False, pdf=False):
         app._poll()
         assert app.metrics["saved"].get() == "60"
         assert app.percent.get() == "60%"
+        assert app.update_button.cget("text") == ""
+        from updater import Release
+        app._set_update_available(Release("v99.0.0", "", "", "", 100000, ""))
+        assert app.update_available and app.update_badge.winfo_manager() == "place"
+        app._set_update_available(Release("v0.0.0", "", "", "", 100000, ""))
+        assert not app.update_available and not app.update_badge.winfo_manager()
+        results["update_arrow_and_badge"] = True
         app.destroy()
         results["modern_ui_events"] = True
         from updater import version_tuple, safe_url
@@ -73,6 +80,23 @@ def run(output, online=False, pdf=False):
             repaired.run()
             assert repaired.new_count == 1 and repaired.reused == 0
             results["corrupt_file_redownloaded"] = True
+            limited_root = Path(tmp) / "limited"
+            limited_base = limited_root / PRESETS[0].issn
+            rows = [{**row, "doi": f"10.1016/j.demo.2024.limit{i}"} for i in range(3)]
+            cached_index(limited_base, rows)
+            limited_cfg = Config("OFFLINE_TEST_CREDENTIAL", PRESETS[0].url, 2024, 2024,
+                                 limited_root, interval=0, max_downloads=1)
+            for expected_reused in (0, 1):
+                limited = Downloader(limited_cfg)
+                calls = []
+                def limited_fetch(doi):
+                    calls.append(doi)
+                    return xml(doi), {"http": 200}
+                limited.fetch = limited_fetch
+                limited.run()
+                assert limited.new_count == 1 and limited.reused == expected_reused
+                assert len(calls) == 1
+            results["download_limit_and_resume"] = True
             for path in Path(tmp).rglob("*"):
                 if path.is_file():
                     assert config.api_key.encode() not in path.read_bytes()

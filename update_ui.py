@@ -1,4 +1,4 @@
-"""Small, user-initiated update dialog; never polls GitHub automatically."""
+"""Compact update dialog with a single, silent version check at startup."""
 from pathlib import Path
 import json
 import os
@@ -13,6 +13,43 @@ from updater import Updater, launch_install, prepare_install, version_tuple
 
 
 class UpdateUI:
+    def _set_update_available(self, release):
+        self.update_available = version_tuple(release.tag) > version_tuple(VERSION)
+        if self.update_available:
+            self.update_badge.place(relx=1, x=-2, y=2, anchor="ne")
+            self.update_badge.lift()
+        else:
+            self.update_badge.place_forget()
+
+    def _cancel_update_notice(self):
+        self.update_notice_generation = getattr(self, "update_notice_generation", 0) + 1
+        control = getattr(self, "update_notice_control", None)
+        if control:
+            control.stop.set()
+
+    def _start_update_notice(self):
+        if self.closing or getattr(self, "update_notice_started", False):
+            return
+        self.update_notice_started = True
+        self._cancel_update_notice()
+        self.update_notice_control = Control()
+        self.update_notice_worker = threading.Thread(target=self._update_notice_work,
+            args=(self.update_notice_control, self.update_notice_generation), daemon=True)
+        self.update_notice_worker.start()
+
+    def _update_notice_work(self, control, generation):
+        try:
+            release = Updater(control).latest()
+            control.checkpoint()
+        except Exception:
+            # An unavailable GitHub connection must not disturb a download.
+            return
+        self.events.put({"kind": "update_notice", "release": release, "generation": generation})
+
+    def _update_notice_event(self, event):
+        if not self.closing and event.get("generation") == getattr(self, "update_notice_generation", None):
+            self._set_update_available(event["release"])
+
     def _update_dialog(self):
         if self.worker and self.worker.is_alive():
             return
@@ -51,6 +88,9 @@ class UpdateUI:
             self.update_window.destroy()
 
     def _run_update(self, operation, release=None):
+        if operation == "check":
+            self.update_notice_started = True
+            self._cancel_update_notice()
         self.control = Control()
         self.update_cancel_close = False
         self.update_request = getattr(self, "update_request", 0) + 1
@@ -106,7 +146,8 @@ class UpdateUI:
             self._log(event["error"])
         elif event["operation"] == "check":
             release = event["release"]
-            if version_tuple(release.tag) > version_tuple(VERSION):
+            self._set_update_available(release)
+            if self.update_available:
                 suffix = "更新后会自动重新打开软件。" if getattr(sys, "frozen", False) else "下载后可直接运行新的 EXE。"
                 self.update_message.set(f"发现新版本 {release.tag}。\n{suffix}")
                 self.update_action.configure(state="normal", text="下载并更新" if getattr(sys, "frozen", False) else "下载新版",
@@ -124,6 +165,7 @@ class UpdateUI:
                 self.update_action.configure(state="normal", text="关闭", command=self._close_update)
                 return
             self.key.set("")
+            self._cancel_update_notice()
             self.destroy()
             return True
         else:
@@ -141,7 +183,7 @@ class UpdateUI:
             result = json.loads(newest.read_text(encoding="utf-8-sig"))
             if result.get("ok") is False:
                 self.status.set("上次更新未完成")
-                self.detail.set("已保留原版本。可点击右上角「更新」重试。")
+                self.detail.set("已保留原版本。可点击右上角向上箭头重试更新。")
                 self._log("上次更新未完成：" + str(result.get("error", "")))
         except (OSError, ValueError, AttributeError):
             pass

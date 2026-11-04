@@ -27,7 +27,7 @@ import uuid
 
 from xml_utils import atomic_bytes, inspect_xml, plain_text, save_fulltext
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 AGENT = f"JournalXMLDownloader/{VERSION} (personal research)"
 FULLTEXT = {"fulltext_structured", "fulltext_rawtext"}
 NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)
@@ -99,6 +99,7 @@ class Config:
     retry_failed: bool = False
     interval: float = 3.0
     timeout: float = 30.0
+    max_downloads: int = 0
 
     def validate(self):
         parse_journal_url(self.url)
@@ -112,6 +113,8 @@ class Config:
             raise ValueError("ISSN 格式或校验位不正确，示例：0034-4257。")
         if not str(self.output).strip():
             raise ValueError("请选择保存文件夹。")
+        if type(self.max_downloads) is not int or self.max_downloads < 0:
+            raise ValueError("下载数量必须是非负整数，0 表示不限。")
 
 
 class Cancelled(Exception):
@@ -358,6 +361,7 @@ class Downloader:
         self.latest = {}
         self.new_count = 0
         self.reused = 0
+        self.download_target = 0
         self.opener = elsevier_opener(config.network)
 
     def scrub(self, value):
@@ -564,6 +568,7 @@ class Downloader:
                    "issn": self.journal.issn, "years": [self.config.start_year, self.config.end_year],
                    "total": len(self.records), "saved": len(self.saved), "reused": self.reused,
                    "downloaded_this_run": self.new_count, "pending": len(pending),
+                   "max_downloads": self.config.max_downloads, "download_target": self.download_target,
                    "failed_or_review": len(self.failures), "source": "Crossref candidate list; Elsevier XML"}
         save_json(self.base / "download_summary.json", summary)
         save_lines(self.base / "pending.jsonl", pending)
@@ -601,7 +606,6 @@ class Downloader:
                 self.saved[row["doi"]] = found
         self.reused = len(self.saved)
         self.log(f"完整性校验结束：{self.reused} / {total} 已保存并通过检查。")
-        self.report("downloading")
         pending = []
         permanent = {"no_fulltext", "needs_review_identity", "needs_review_unstructured", "doi_mismatch", "http_error", "api_error", "invalid_xml"}
         for row in self.records:
@@ -612,6 +616,8 @@ class Downloader:
                 self.failures[doi] = self.latest[doi]
             else:
                 pending.append(row)
+        self.download_target = min(self.config.max_downloads, len(pending)) if self.config.max_downloads else 0
+        self.report("downloading")
         if not pending:
             self.report("finished_with_pending" if len(self.saved) < total else "complete")
             return
@@ -664,6 +670,16 @@ class Downloader:
                 self.report("downloading")
                 if result.get("action_required"):
                     raise ActionRequired(result["action_required"])
+                if self.config.max_downloads and self.new_count >= self.config.max_downloads:
+                    # Finish before any interval, deferred retry or quota wait.
+                    # Keep a known quota reset so the next run still respects it.
+                    if result.get("remaining") == "0":
+                        deadline = quota_deadline(result.get("quota_reset_epoch"))
+                        if deadline:
+                            self.persist_pause(deadline, "API 配额用完，等待恢复")
+                    self.log(f"已达到本次数量：成功下载 {self.new_count} 篇，任务结束。")
+                    self.report("limit_reached")
+                    return
                 if result.get("remaining") == "0" and (index + 1 < len(pending) or deferred):
                     deadline = quota_deadline(result.get("quota_reset_epoch"))
                     if not deadline:
