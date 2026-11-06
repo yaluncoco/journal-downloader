@@ -60,6 +60,24 @@ class ControllerTests(unittest.TestCase):
         app._poll()
         self.assertEqual(app.pdf_status.get(), footer)
 
+    def test_offline_pdf_diagnostic_button_reports_result_without_changing_library(self):
+        app = self.quiet_app()
+        folder = app.output.get()
+        app._pdf_dialog()
+        app.pdf_window.withdraw()
+        with tempfile.TemporaryDirectory() as tmp:
+            report = str(Path(tmp) / "diagnostic.json")
+            with patch("controller.filedialog.asksaveasfilename", return_value=report), \
+                 patch("pdf_browser.diagnose") as diagnose:
+                app.check_pdf_environment()
+                app.worker.join(5)
+                app._poll()
+                diagnose.assert_called_once()
+                self.assertEqual(diagnose.call_args.args[0], report)
+            self.assertEqual(app.status.get(), "PDF 环境检测通过")
+            self.assertIn(report, app.detail.get())
+            self.assertEqual(app.output.get(), folder)
+
     def test_folder_scan_restores_existing_library_and_ignores_stale_results(self):
         from test_inventory import identified_xml
         with tempfile.TemporaryDirectory() as tmp:

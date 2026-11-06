@@ -4,6 +4,15 @@ import sys
 
 
 def main():
+    if "--pdf-check" in sys.argv:
+        from pdf_browser import diagnose
+        from engine import ActionRequired
+        index = sys.argv.index("--pdf-check")
+        try:
+            diagnose(Path(sys.argv[index + 1]))
+        except ActionRequired:
+            pass  # The machine-readable report already contains each attempt.
+        return
     if "--self-test" in sys.argv:
         from smoke_test import run
         index = sys.argv.index("--self-test")

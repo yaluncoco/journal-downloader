@@ -13,12 +13,25 @@ def independent_environment():
         if name.startswith("_PYI_") or name in {"_MEIPASS2", "PSModulePath"}:
             environment.pop(name, None)
     environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle:
+        from pathlib import Path
+        bundle = Path(bundle).resolve()
+        paths = []
+        for part in environment.get("PATH", "").split(os.pathsep):
+            try:
+                bundled = bool(part) and Path(part.strip('"')).resolve().is_relative_to(bundle)
+            except (OSError, ValueError):
+                bundled = False
+            if not bundled:
+                paths.append(part)
+        environment["PATH"] = os.pathsep.join(paths)
     return environment
 
 
 @contextmanager
 def clean_dll_search_path():
-    """External installers must not inherit PyInstaller's private DLL directory."""
+    """External processes must not inherit PyInstaller's private DLL directory."""
     if sys.platform != "win32" or not getattr(sys, "frozen", False):
         yield
         return

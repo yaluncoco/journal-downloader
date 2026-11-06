@@ -12,19 +12,26 @@ SKIP = {"fulltext_pdf", "review_required", "library-data", "indexes", "node_modu
 
 
 def xml_files(root, checkpoint=lambda: None):
+    """Enumerate every supported layout; links are read-only and cycle checked."""
     root = Path(root)
     if not root.is_dir():
         return
-    for folder, directories, files in os.walk(root, followlinks=False):
+    visited = set()
+    def onerror(error):
+        raise OSError(f"无法完整读取 XML 目录：{error.filename}。请检查目录是否在线及读取权限；已停止，避免重复下载。") from error
+    for folder, directories, files in os.walk(root, followlinks=True, onerror=onerror):
         checkpoint()
-        directories[:] = sorted(d for d in directories if not d.startswith(".") and d not in SKIP
-                                and not (Path(folder) / d).is_symlink()
-                                and not (hasattr(Path, "is_junction") and (Path(folder) / d).is_junction()))
+        stat = Path(folder).stat()
+        identity = (stat.st_dev, stat.st_ino) if stat.st_ino else str(Path(folder).resolve()).casefold()
+        if identity in visited:
+            directories[:] = []
+            continue
+        visited.add(identity)
+        directories[:] = sorted((d for d in directories if not d.startswith(".") and d not in SKIP),
+                                key=lambda d: (d != "fulltext_xml", d))
         for name in sorted(files):
             if name.lower().endswith(".xml"):
-                path = Path(folder) / name
-                if not path.is_symlink():
-                    yield path
+                yield Path(folder) / name
 
 
 def read_xml(path):
@@ -62,9 +69,8 @@ def read_xml(path):
 
 def scan_existing(base, start=1800, end=2100, checkpoint=lambda: None):
     base = Path(base)
-    root = base / "fulltext_xml" if (base / "fulltext_xml").is_dir() else base
     saved, invalid, outside, duplicates = {}, 0, 0, 0
-    for path in xml_files(root, checkpoint):
+    for path in xml_files(base, checkpoint):
         checkpoint()
         try:
             info = read_xml(path)
@@ -105,9 +111,8 @@ def identifies(base, issn, title):
                 pass
     if base.name == issn and any((base / name).is_dir() for name in ("fulltext_xml", "fulltext_pdf")):
         return True
-    root = base / "fulltext_xml" if (base / "fulltext_xml").is_dir() else base
     # XML identifies a moved library even when its local state is unavailable.
-    for index, path in enumerate(xml_files(root)):
+    for index, path in enumerate(xml_files(base)):
         if index >= 8:
             break
         try:
@@ -119,12 +124,18 @@ def identifies(base, issn, title):
     return False
 
 
+def has_xml_layout(root):
+    return (any((root / name).is_dir() for name in ("fulltext_xml", "fulltext_pdf"))
+            or any(root.glob("*.xml"))
+            or any(p.is_dir() and re.fullmatch(r"\d{4}", p.name) for p in root.iterdir())) if root.is_dir() else False
+
+
 def detect_journal(root):
     """Infer only an explicitly selected library, never an aggregate download root."""
     import json
     from journal_catalog import lookup
     root = normalize_root(root)
-    if not any((root / name).is_dir() for name in ("fulltext_xml", "fulltext_pdf")) and not any(root.glob("*.xml")):
+    if not has_xml_layout(root):
         return None
     for directory in (state_dir(root), root):
         try:
@@ -138,7 +149,7 @@ def detect_journal(root):
     if item:
         return item
     found = {}
-    for index, path in enumerate(xml_files(root / "fulltext_xml" if (root / "fulltext_xml").is_dir() else root)):
+    for index, path in enumerate(xml_files(root)):
         if index >= 8:
             break
         try:
@@ -156,7 +167,7 @@ def resolve_library(root, issn, title):
     root = normalize_root(root)
     if (root / issn).is_dir():
         return root / issn
-    if any((root / name).is_dir() for name in ("fulltext_xml", "fulltext_pdf")) or any(root.glob("*.xml")):
+    if has_xml_layout(root):
         if identifies(root, issn, title):
             return root
     # Preserve legacy state-only library locations.

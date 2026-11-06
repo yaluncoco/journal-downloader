@@ -391,9 +391,13 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
             unselected_hover_color="#E0E9EF", text_color=INK, font=self.body_font).grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 20))
         wrap_to(self.label(body, "使用主界面的 API Key 与网络设置；完整 PDF 会校验后跳过。\n输出到文库的 fulltext_pdf 文件夹。需要已安装 Edge 或 Chrome。\n生成的是 XML 重排阅读版，分页和细节可能与官方 PDF 不同。", font=self.small_font,
                    color=MUTED, justify="left"), padding=12).grid(row=3, column=0, sticky="w", padx=6)
-        ctk.CTkButton(win, text="开始合成", height=44, width=140, corner_radius=12,
+        actions = ctk.CTkFrame(win, fg_color="transparent")
+        actions.grid(row=1, column=0, sticky="ew", padx=28, pady=(4, 16))
+        actions.grid_columnconfigure(1, weight=1)
+        self.secondary(actions, "检测 PDF 环境", self.check_pdf_environment, width=130).grid(row=0, column=0)
+        ctk.CTkButton(actions, text="开始合成", height=44, width=140, corner_radius=12,
             fg_color=TEAL, hover_color=TEAL_HOVER, font=self.bold_font,
-            command=lambda: self.start_pdf(folder_var.get(), "double" if layout_var.get() == "期刊双栏" else "single")).grid(row=1, column=0, sticky="e", padx=28, pady=(4, 16))
+            command=lambda: self.start_pdf(folder_var.get(), "double" if layout_var.get() == "期刊双栏" else "single")).grid(row=0, column=1, sticky="e")
 
     def year_control(self, parent, variable):
         frame = ctk.CTkFrame(parent, fg_color="#F7F9FB", corner_radius=10, border_width=1, border_color=LINE)

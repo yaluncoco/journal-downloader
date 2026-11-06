@@ -62,10 +62,12 @@ class Article:
         info = inspect_xml(data, self.doi)
         if info["status"] != "fulltext_structured":
             raise ValueError("需要含结构化正文的 XML。rawtext/仅摘要文件无法可靠还原图表，已留待处理。")
-        self.article = first(first(self.root, "originalText"), "article")
+        original = first(self.root, "originalText")
+        self.article = next((node for node in original.iter()
+                             if local(node) in ("article", "simple-article")), None) if original is not None else None
         if self.article is None:
-            raise ValueError("XML 缺少受支持的 article 结构。")
-        self.head = first(self.article, "head")
+            raise ValueError("XML 缺少受支持的 article/simple-article 结构，已保留原文件。")
+        self.head = next((node for node in self.article if local(node) in ("head", "simple-head")), None)
         self.body = first(self.article, "body")
         self.tail = first(self.article, "tail")
         self.title = text(self.head, "title") or text(core, "title")

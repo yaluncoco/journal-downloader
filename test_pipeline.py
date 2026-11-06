@@ -49,14 +49,14 @@ class PipelineTests(unittest.TestCase):
                       'title': title} for i, title in enumerate(('Forest deep learning', 'Crop simulation', 'Forest monitoring'))]
         cached_index(self.base, self.rows)
         self.order = []
-        browser = patch('pdf_export.find_browser', return_value=Path('mock-browser'))
+        browser = patch('pdf_export.BrowserRenderer.ensure_ready')
         browser.start()
         self.addCleanup(browser.stop)
-        self.render_patch = patch('pdf_export.render_pdf', side_effect=self.render)
+        self.render_patch = patch('pdf_export.BrowserRenderer.render', side_effect=self.render)
         self.render_mock = self.render_patch.start()
         self.addCleanup(self.render_patch.stop)
 
-    def render(self, document, browser, work, control):
+    def render(self, document, doi):
         doi = next(row['doi'] for row in self.rows if row['doi'] in document)
         self.order.append(('pdf', doi))
         return sample_pdf(doi)

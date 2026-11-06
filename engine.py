@@ -28,7 +28,7 @@ import uuid
 from xml_utils import atomic_bytes, inspect_xml, plain_text, save_fulltext
 from library_store import state_dir, sidecar_path, existing_sidecar, migrate_library
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 AGENT = f"JournalXMLDownloader/{VERSION} (personal research)"
 FULLTEXT = {"fulltext_structured", "fulltext_rawtext"}
 NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)
@@ -725,6 +725,9 @@ class Downloader:
         if not pending:
             self.report("finished_with_pending" if len(self.saved) < total else "complete")
             return
+        if self.output_processor:
+            # Test printing before spending API quota on a PDF output task.
+            self.output_processor.exporter.renderer.ensure_ready()
         pause = load_json(self.state / "server_pause.json", {})
         deadline = quota_deadline(pause.get("deadline"))
         network_started = False

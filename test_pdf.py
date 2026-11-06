@@ -162,6 +162,28 @@ class PdfTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "rawtext"):
             Article(b'<root><coredata><doi>10.1/x</doi></coredata><originalText><rawtext>Only text</rawtext></originalText></root>')
 
+    def test_simple_article_corrigendum_preserves_head_body_and_math(self):
+        data = fixture('<sections><para>Correction <m:math><m:mi>x</m:mi></m:math> is complete.</para></sections>')
+        for old, new in ((b'<article>', b'<simple-article>'), (b'</article>', b'</simple-article>'),
+                         (b'<head>', b'<simple-head>'), (b'</head>', b'</simple-head>')):
+            data = data.replace(old, new)
+        rendered = Article(data).render({})
+        for text in ('Example article', 'Ada', 'Correction', '<mi>x</mi>', 'Example reference'):
+            self.assertIn(text, rendered)
+
+    def test_batch_scans_old_and_new_xml_layouts_and_deduplicates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for index, folder in enumerate((root / '2024', root / 'fulltext_xml/2024')):
+                folder.mkdir(parents=True)
+                (folder / (folder.parent.name + '.xml')).write_bytes(fixture().replace(DOI.encode(), (DOI + str(index)).encode()))
+            (root / '2024/duplicate.xml').write_bytes((folder / (folder.parent.name + '.xml')).read_bytes())
+            exporter = PdfExporter(PdfConfig(root))
+            with patch.object(exporter, 'export_one', return_value={'status': 'pdf_saved', 'doi': DOI}) as export:
+                result = exporter.run()
+                self.assertEqual(result['saved'], 2)
+                self.assertEqual(export.call_count, 2)
+
     def test_batch_failed_article_continues_and_checks_sha(self):
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / "fulltext_xml" / "2024"
@@ -170,8 +192,8 @@ class PdfTests(unittest.TestCase):
             (source / "a.xml.sha256").write_text("wrong")
             (source / "b.xml").write_bytes(fixture())
             output = Path(temp) / "pdf"
-            with patch("pdf_export.find_browser", return_value=Path("fake-browser")), \
-                 patch("pdf_export.render_pdf", return_value=b"fakepdf"), \
+            with patch("pdf_export.BrowserRenderer.ensure_ready"), \
+                 patch("pdf_export.BrowserRenderer.render", return_value=b"fakepdf"), \
                  patch("pdf_export.validate_pdf", return_value=1):
                 result = PdfExporter(PdfConfig(source.parent, output=output)).run()
                 self.assertEqual(result["saved"], 1)

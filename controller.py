@@ -200,6 +200,35 @@ class Controller(LibraryPreview):
                     runner.output_processor.exporter.cfg.api_key = ""
             cfg.api_key = ""
 
+    def check_pdf_environment(self):
+        if self.worker and self.worker.is_alive():
+            return
+        report = filedialog.asksaveasfilename(parent=self.pdf_window, title="保存 PDF 环境诊断",
+            initialfile="PDF环境诊断.json", defaultextension=".json", filetypes=[("诊断记录", "*.json")])
+        if not report:
+            return
+        self.pdf_window.destroy()
+        self._cancel_library_scan()
+        self.active_job, self.pipeline_pdf, self.stages = "diagnostic", False, ""
+        self.control = Control()
+        self._busy(True)
+        self.status.set("正在检测 PDF 环境")
+        self._log("离线检测 PDF 环境，不读取论文或 API Key，不消耗 API 配额。")
+        def work():
+            outcome, text = "complete", f"PDF 环境检测通过。诊断文件：{report}"
+            try:
+                from pdf_browser import diagnose
+                diagnose(report, self.control, lambda **event: self.events.put(event))
+            except Cancelled:
+                outcome, text = "stopped", "已停止 PDF 环境检测。"
+            except ActionRequired as error:
+                outcome, text = "action_required", str(error)
+            except Exception as error:
+                outcome, text = "error", f"诊断未完成：{error}"
+            self.events.put({"kind": "done", "outcome": outcome, "text": text})
+        self.worker = threading.Thread(target=work, daemon=False)
+        self.worker.start()
+
     def start_pdf(self, source, layout="double"):
         if self.worker and self.worker.is_alive():
             return
@@ -352,7 +381,9 @@ class Controller(LibraryPreview):
                 outcome = event["outcome"]
                 text = event["text"]
                 if outcome == "complete":
-                    if self.active_job == "pdf":
+                    if self.active_job == "diagnostic":
+                        self.status.set("PDF 环境检测通过")
+                    elif self.active_job == "pdf":
                         if self.stages == "pdf_finished_with_pending":
                             self.status.set("合成结束 · 部分待处理")
                             text = "部分 XML 或图片需要检查，请查看运行记录；详细记录保存在本机应用数据中，再次合成可重试。"

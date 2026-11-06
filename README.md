@@ -4,6 +4,8 @@
 
 常用入口保留 **Remote Sensing of Environment（RSE）** 与 **ISPRS Journal of Photogrammetry and Remote Sensing**。点击「检索全部期刊」可按英文名称、关键词或 ISSN 搜索内置目录，也支持粘贴期刊地址。
 
+**v1.6.1** 修复跨电脑 PDF 启动兼容与旧文库续传：打印前离线检测 Edge/Chrome，自动尝试可用浏览器；故障时保留退出码及诊断记录。下载与合成同时识别文库年份目录和 `fulltext_xml`，支持勘误的 `simple-article` 结构。在「合成 PDF」中点击「检测 PDF 环境」可导出诊断文件，无需 Key 或联网。
+
 **v1.6.0** 改为 Windows 安装版，更新通过安装向导完成。窗口按可用屏幕与 DPI 调整大小，窄窗口改为上下排列，检索和弹窗随窗口换行。首次从旧便携版迁移，请关闭旧程序并手动运行安装包一次；后续从开始菜单启动。
 
 v1.5.0 新增逐篇 XML→PDF、仅 PDF 输出、下载前题名词组筛选、当前目录 PDF 完整性统计，以及官方学科与 2025 中科院参考分区筛选。数据来源及 GitHub 示例参考见 [DATA_SOURCES.md](DATA_SOURCES.md)。

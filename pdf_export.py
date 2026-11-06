@@ -5,13 +5,8 @@ from dataclasses import dataclass, field
 from contextlib import contextmanager
 import hashlib
 import io
-import os
 from pathlib import Path
 import re
-import shutil
-import subprocess
-import tempfile
-import time
 
 from pypdf import PdfReader
 
@@ -19,6 +14,8 @@ from engine import (ActionRequired, Cancelled, Control, append_log, atomic_bytes
                     library_lock, load_json, save_json, save_lines, timestamp)
 from pdf_assets import ImageCache, image_objects
 from pdf_document import Article
+from pdf_browser import BrowserRenderer
+from library_inventory import read_xml, xml_files
 from library_store import state_dir, existing_sidecar, sidecar_path, migrate_pdf
 
 RENDERER_VERSION = "1.3.0-layout5"
@@ -45,23 +42,6 @@ class PdfConfig:
             raise ValueError("API Key 不能含空格或换行。")
 
 
-def find_browser():
-    candidates = []
-    for environment in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA"):
-        folder = os.environ.get(environment)
-        if folder:
-            candidates.extend(Path(folder) / suffix for suffix in (
-                "Microsoft/Edge/Application/msedge.exe", "Google/Chrome/Application/chrome.exe"))
-    for name in ("msedge", "google-chrome", "chromium", "chromium-browser"):
-        binary = shutil.which(name)
-        if binary:
-            candidates.append(Path(binary))
-    browser = next((p for p in candidates if p.is_file()), None)
-    if browser is None:
-        raise ActionRequired("合成 PDF 需要已安装的 Microsoft Edge 或 Google Chrome。安装后可再次运行，无需 Python。")
-    return browser
-
-
 def validate_pdf(data, doi):
     if not data.startswith(b"%PDF-") or b"%%EOF" not in data[-2048:]:
         raise ValueError("PDF 文件未完整写入。")
@@ -78,41 +58,6 @@ def validate_pdf(data, doi):
     return pages
 
 
-def render_pdf(document, browser, work, control):
-    html_path, pdf_path = work / "article.html", work / "article.pdf"
-    html_path.write_text(document, encoding="utf-8")
-    profile = work / "browser-profile"
-    command = [str(browser), "--headless", "--disable-gpu", "--no-first-run",
-               "--no-default-browser-check", "--disable-extensions", "--disable-background-networking",
-               "--disable-component-update", "--no-pdf-header-footer",
-               "--run-all-compositor-stages-before-draw", "--timeout=90000",
-               "--host-resolver-rules=MAP * ~NOTFOUND",
-               "--user-data-dir=" + str(profile), "--print-to-pdf=" + str(pdf_path),
-               html_path.resolve().as_uri()]
-    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    with (work / "browser.log").open("wb") as log:
-        process = subprocess.Popen(command, stdout=log, stderr=log, creationflags=flags)
-        deadline = time.monotonic() + 120
-        try:
-            while process.poll() is None:
-                control.checkpoint()
-                if time.monotonic() > deadline:
-                    raise ValueError("本篇排版超时，已留待重试。")
-                control.stop.wait(0.2)
-            if process.returncode or not pdf_path.is_file():
-                raise ValueError("浏览器没有生成有效 PDF，请检查 Edge/Chrome 安装。")
-            return pdf_path.read_bytes()
-        finally:
-            if process.poll() is None:
-                if os.name == "nt":
-                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   creationflags=flags, timeout=15)
-                else:
-                    process.kill()
-                process.wait(timeout=15)
-
-
 class PdfExporter:
     def __init__(self, cfg, emit=lambda **event: None, control=None):
         cfg.validate()
@@ -120,14 +65,14 @@ class PdfExporter:
         self.control = control or Control()
         self.control.emit = emit
         source = cfg.source.resolve()
-        self.xml_root = source / "fulltext_xml" if (source / "fulltext_xml").is_dir() else source
+        self.xml_root = source
         library = self.xml_root.parent if self.xml_root.name == "fulltext_xml" else source
         if source.parent.name == "fulltext_xml":
             library = source.parent.parent
         self.output = (cfg.output or library / "fulltext_pdf").resolve()
         self.state = state_dir(self.output)
         self.cache = self.state / "image-cache"
-        self.browser = None
+        self.renderer = BrowserRenderer(self.state / "pdf-diagnostics.json", self.control, emit)
 
     def count(self, total, saved, reused, stage):
         self.emit(kind="counts", total=total, saved=saved, reused=reused,
@@ -171,8 +116,7 @@ class PdfExporter:
         meta_path = sidecar_path(target)
         if self.reusable(target, existing_sidecar(target), fingerprint):
             return {"status": "already_saved", "doi": article.doi, "pdf": str(target), "xml_sha256": digest}
-        if self.browser is None:
-            self.browser = find_browser()
+        self.renderer.ensure_ready()
         self.emit(kind="phase", text=f"正在准备 PDF 图片 · {article.title}")
         cache = ImageCache(self.cache / digest[:24], self.key, self.cfg.network, self.control, self.emit)
         objects = image_objects(article.root)
@@ -189,11 +133,8 @@ class PdfExporter:
             cache.key = ""
         document = article.render(images, self.cfg.layout)
         self.emit(kind="phase", text=f"正在排版与校验 PDF · {article.doi}")
-        temp_base = self.state / "work"
-        temp_base.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="pdf-", dir=temp_base, ignore_cleanup_errors=True) as tmp:
-            pdf = render_pdf(document, self.browser, Path(tmp), self.control)
-            pages = validate_pdf(pdf, article.doi)
+        pdf = self.renderer.render(document, article.doi)
+        pages = validate_pdf(pdf, article.doi)
         self.control.checkpoint()
         atomic_bytes(target, pdf)
         save_json(meta_path, {**fingerprint, "pdf_sha256": hashlib.sha256(pdf).hexdigest(),
@@ -206,18 +147,26 @@ class PdfExporter:
     def _run(self):
         self.emit(kind="phase", text="正在扫描已下载 XML…")
         records = []
-        for source in sorted(self.xml_root.rglob("*.xml")):
+        seen, duplicates = set(), 0
+        for source in xml_files(self.xml_root, self.control.checkpoint):
             self.control.checkpoint()
-            if any(part in ("review_required", "fulltext_pdf", ".image-cache", ".work")
-                   for part in source.relative_to(self.xml_root).parts[:-1]):
-                continue
             # Existing libraries archive by year; restrict before reading large files.
             year = next((int(p) for p in reversed(source.relative_to(self.xml_root).parts[:-1]) if re.fullmatch(r"\d{4}", p)), None)
             if year is None and re.fullmatch(r"\d{4}", self.xml_root.name):
                 year = int(self.xml_root.name)
             if year is not None and not self.cfg.start_year <= year <= self.cfg.end_year:
                 continue
+            try:
+                info = read_xml(source)
+                if info["doi"] in seen:
+                    duplicates += 1
+                    continue
+                seen.add(info["doi"])
+            except (OSError, ValueError):
+                pass  # Keep damaged files in the batch so their errors are reported.
             records.append((source, year))
+        if duplicates:
+            self.emit(kind="log", text=f"检测到 {duplicates} 份重复 XML，每个 DOI 合成一次，原文件均保留。")
         total, saved, reused, pending = len(records), 0, 0, []
         self.count(total, saved, reused, "pdf")
         for index, (source, year) in enumerate(records, 1):

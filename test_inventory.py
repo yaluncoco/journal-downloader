@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from engine import Config, Downloader, PRESETS, library_path, paths_for, save_fulltext
-from library_inventory import scan_existing
+from library_inventory import scan_existing, xml_files, detect_journal
 from library_store import sidecar_path
 from smoke_test import xml, cached_index
 
@@ -101,3 +101,49 @@ class InventoryTests(unittest.TestCase):
         result = scan_existing(self.root)
         self.assertEqual(len(result["saved"]), 1)
         self.assertEqual(result["duplicates"], 1)
+
+    def test_legacy_years_and_partial_new_directory_resume_without_api(self):
+        library = self.root / PRESETS[0].issn
+        rows = [{"doi": f"10.1016/j.demo.legacy{i}", "year": 2024, "date": "2024", "title": "Test"} for i in range(3)]
+        cached_index(library, rows)
+        old = library / "2024"
+        old.mkdir(parents=True)
+        for row in rows:
+            (old / (row["doi"].split("/")[-1] + ".xml")).write_bytes(identified_xml(row["doi"]))
+        self.assertEqual(library_path(library, PRESETS[0]), library)
+        self.assertEqual(detect_journal(library)["issn"], PRESETS[0].issn)
+        # Creating a new, empty canonical directory must not hide the old files.
+        new = library / "fulltext_xml" / "2024"
+        new.mkdir(parents=True)
+        self.assertEqual(len(scan_existing(library)["saved"]), 3)
+        (new / "duplicate.xml").write_bytes(identified_xml(rows[0]["doi"]))
+        self.assertEqual(scan_existing(library)["duplicates"], 1)
+        runner = Downloader(Config("SYNTHETIC_KEY", PRESETS[0].url, 2024, 2024, library, interval=0))
+        runner.fetch = lambda *_: self.fail("Complete legacy XML triggered an API request")
+        runner.run()
+        self.assertEqual((runner.reused, runner.new_count), (3, 0))
+        self.assertEqual(len(list(old.glob("*.xml"))), 3)
+
+    def test_junction_enumeration_is_read_only_and_cycle_safe(self):
+        import os
+        if os.name != "nt":
+            self.skipTest("Windows directory junction regression")
+        import _winapi
+        library, backing = self.root / "library", self.root / "backing"
+        library.mkdir()
+        backing.mkdir()
+        source = backing / "paper.xml"
+        source.write_bytes(identified_xml("10.1016/j.demo.linked"))
+        _winapi.CreateJunction(str(backing), str(library / "fulltext_xml"))
+        _winapi.CreateJunction(str(library), str(backing / "cycle"))
+        self.assertEqual(len(list(xml_files(library))), 1)
+        self.assertEqual(len(scan_existing(library)["saved"]), 1)
+        self.assertTrue(source.exists())
+
+    def test_unreadable_directory_is_not_silently_empty(self):
+        def denied(root, **kwargs):
+            kwargs["onerror"](PermissionError(13, "denied", str(root / "2024")))
+            yield  # Match os.walk's lazy behavior.
+        with patch("library_inventory.os.walk", side_effect=denied):
+            with self.assertRaisesRegex(OSError, "避免重复下载"):
+                scan_existing(self.root)
