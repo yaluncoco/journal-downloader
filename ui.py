@@ -3,7 +3,8 @@ from pathlib import Path
 import queue
 import sys
 
-import customtkinter as ctk
+from ui_runtime import prepare_ui, defer_canvas_paints
+ctk = prepare_ui()
 from PIL import Image, ImageDraw
 
 from controller import Controller, SETTINGS_DIR
@@ -24,10 +25,14 @@ FONT = "Microsoft YaHei UI"
 
 
 class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
-    def __init__(self, *, check_updates=True, remember_credentials=True, scan_libraries=True):
+    def __init__(self, *, check_updates=True, remember_credentials=True, scan_libraries=True,
+                 settings=None, visible=True):
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
         super().__init__(fg_color=BG)
+        self.withdraw()
+        if not visible:
+            self.attributes("-alpha", 0)
         self.title("期刊全文下载器")
         self.assets = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
         self.geometry("1080x790")
@@ -43,7 +48,7 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         self.pdf_window = None
         self.use_key_store = remember_credentials
         self.scan_libraries = scan_libraries
-        self.settings = load_json(SETTINGS_DIR / "settings.json", {})
+        self.settings = load_json(SETTINGS_DIR / "settings.json", {}) if settings is None else dict(settings)
         if not isinstance(self.settings, dict):
             self.settings = {}
         self._variables()
@@ -51,6 +56,7 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         self.small_font = ctk.CTkFont(FONT, 12)
         self.bold_font = ctk.CTkFont(FONT, 15, weight="bold")
         self._layout()
+        defer_canvas_paints(self)
         self._layout_after = None
         self._layout_mode = None
         self.bind("<Configure>", self._schedule_layout, add="+")
@@ -58,9 +64,13 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         self._init_library_watch()
         self._report_update_result()
         self.protocol("WM_DELETE_WINDOW", self.close)
-        self.after(120, self._poll)
-        self.after(220, self._set_icon)
-        self.after(30, self._fit_screen)
+        self._poll_after = self.after(120, self._poll)
+        self._set_icon()
+        self._fit_screen()
+        self.update_idletasks()
+        self._responsive_layout()
+        self.update_idletasks()
+        self.deiconify()
         if check_updates:
             self.after(1500, self._start_update_notice)
 
@@ -86,9 +96,12 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         if self.state() == "normal" and (self.winfo_width() > right - left or
                 self.winfo_height() > bottom - top - 36 * scale):
             fit_window(self, (int(self.winfo_width() / scale), int(self.winfo_height() / scale)))
-        width = self.winfo_width() / self.content._get_widget_scaling()
+        # A withdrawn window has no allocated pixels yet on some Tk builds.
+        width = (self.winfo_width() / self.content._get_widget_scaling()
+                 if self.winfo_ismapped() else self._current_width)
         compact = width < 580
-        short = compact and self.winfo_height() / scale < 380
+        height = self.winfo_height() / scale if self.winfo_ismapped() else self._current_height
+        short = compact and height < 380
         mode = (width < 920, compact, short)
         if mode == self._layout_mode:
             return

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog,messagebox
 from engine import ActionRequired, Cancelled, Config, Control, Downloader, PRESETS, save_json
@@ -87,13 +88,20 @@ class Controller(LibraryPreview):
             self.output.set(folder)
 
     def _log(self, text):
+        self._log_batch([text])
+
+    def _log_batch(self, messages):
+        if not messages:
+            return
         key = self.key.get().strip()
-        if key:
-            text = text.replace(key, "[已隐藏]")
+        stamp = datetime.now().strftime("%H:%M:%S")
+        text = "".join(stamp + "  " + (message.replace(key, "[已隐藏]") if key else message) + "\n"
+                       for message in messages)
         self.logbox.configure(state="normal")
-        self.logbox.insert("end", datetime.now().strftime("%H:%M:%S") + "  " + text + "\n")
-        if int(self.logbox.index("end-1c").split(".")[0]) > 800:
-            self.logbox.delete("1.0", "200.0")
+        self.logbox.insert("end", text)
+        lines = int(self.logbox.index("end-1c").split(".")[0])
+        if lines > 800:
+            self.logbox.delete("1.0", f"{lines - 600}.0")
         self.logbox.see("end")
         self.logbox.configure(state="disabled")
 
@@ -324,18 +332,34 @@ class Controller(LibraryPreview):
             messagebox.showerror("无法打开文件夹", str(error), parent=self)
 
     def _poll(self):
+        if getattr(self, "_poll_after", None):
+            self.after_cancel(self._poll_after)
+            self._poll_after = None
+        # Bound time, not just event count: hundreds of Tk redraws can otherwise
+        # monopolize the event loop on slower CPUs. Preserve event order.
+        deadline = time.perf_counter() + .008
+        logs = []
         for _ in range(200):
+            if time.perf_counter() >= deadline:
+                break
             try:
                 event = self.events.get_nowait()
             except queue.Empty:
                 break
             kind = event["kind"]
             if kind == "log":
-                self._log(event["text"])
-            elif kind == "update_notice":
+                logs.append(event["text"])
+                continue
+            self._log_batch(logs)
+            logs.clear()
+            if kind == "update_notice":
                 self._update_notice_event(event)
             elif kind == "library_preview":
                 self._library_preview_event(event)
+            elif kind == "library_scan_progress":
+                if (event["generation"] == self.scan_generation and not self.closing
+                        and not (self.worker and self.worker.is_alive())):
+                    self.local_hint.set(f"正在校验当前目录 · 已检查 {event['checked']} 个文件…")
             elif kind in ("update_result", "update_progress"):
                 if self._update_event(event):
                     return
@@ -438,7 +462,8 @@ class Controller(LibraryPreview):
                 if self.closing:
                     self.destroy()
                     return
-        self.after(120, self._poll)
+        self._log_batch(logs)
+        self._poll_after = self.after(16 if not self.events.empty() else 120, self._poll)
 
     def close(self):
         self._cancel_library_scan()

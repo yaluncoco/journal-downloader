@@ -67,13 +67,13 @@ def read_xml(path):
             "journal": next(iter(values("publicationName")), "")}
 
 
-def scan_existing(base, start=1800, end=2100, checkpoint=lambda: None):
+def scan_existing(base, start=1800, end=2100, checkpoint=lambda: None, *, preview_cache=None):
     base = Path(base)
     saved, invalid, outside, duplicates = {}, 0, 0, 0
     for path in xml_files(base, checkpoint):
         checkpoint()
         try:
-            info = read_xml(path)
+            info = preview_cache.read(path, read_xml) if preview_cache is not None else read_xml(path)
         except (OSError, ValueError, ET.ParseError):
             invalid += 1
             continue

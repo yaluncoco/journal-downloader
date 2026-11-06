@@ -7,6 +7,23 @@ from contextlib import contextmanager
 APP_MUTEX = "Local\\JournalDownloader-6EC76596-6DF5-4BEA-A645-E8D8084EC6D8"
 
 
+def background_call(function):
+    """Lower only the inventory thread's CPU/I/O priority, never the UI thread."""
+    changed = False
+    if sys.platform == "win32":
+        from ctypes import wintypes
+        kernel = ctypes.windll.kernel32
+        kernel.GetCurrentThread.restype = wintypes.HANDLE
+        kernel.SetThreadPriority.argtypes = [wintypes.HANDLE, ctypes.c_int]
+        handle = kernel.GetCurrentThread()
+        changed = bool(kernel.SetThreadPriority(handle, 0x10000))  # BACKGROUND_BEGIN
+    try:
+        return function()
+    finally:
+        if changed:
+            kernel.SetThreadPriority(handle, 0x20000)  # BACKGROUND_END
+
+
 def independent_environment():
     environment = os.environ.copy()
     for name in list(environment):

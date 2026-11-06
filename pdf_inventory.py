@@ -26,7 +26,7 @@ def read_pdf(path, expected=None):
     return {**meta, "doi": meta["doi"].lower(), "path": str(path), "year": year}
 
 
-def scan_pdfs(base, start=1800, end=2100, checkpoint=lambda: None):
+def scan_pdfs(base, start=1800, end=2100, checkpoint=lambda: None, *, preview_cache=None):
     root = Path(base)
     root = root if root.name == "fulltext_pdf" else root / "fulltext_pdf"
     saved, invalid, unverified, invalid_dois = {}, 0, 0, set()
@@ -48,7 +48,7 @@ def scan_pdfs(base, start=1800, end=2100, checkpoint=lambda: None):
                     unverified += 1
                     continue
                 try:
-                    info = read_pdf(path)
+                    info = preview_cache.read(path, read_pdf) if preview_cache is not None else read_pdf(path)
                     if info["year"] is not None and not start <= info["year"] <= end:
                         continue
                     saved.setdefault(info["doi"], info)

@@ -1,6 +1,7 @@
 """Debounced, generation-safe library preview; no network and no writes."""
 from pathlib import Path
 import threading
+import time
 
 from engine import Cancelled, Journal, library_path, local_journal, parse_journal_url, valid_issn, load_json
 from article_filter import filter_records, OUTPUT_MODES, FILTER_MODES
@@ -8,6 +9,8 @@ from article_filter import filter_records, OUTPUT_MODES, FILTER_MODES
 
 class LibraryPreview:
     def _init_library_watch(self):
+        from preview_cache import PreviewCache
+        self.preview_cache = PreviewCache()
         self.scan_generation = 0
         self.scan_after = None
         self.scan_cancel = None
@@ -27,7 +30,10 @@ class LibraryPreview:
             self.scan_cancel.set()
 
     def _queue_library_scan(self, *_):
-        self.scan_detect = not _ or _[0] == str(self.output)
+        if _ and _[0] == str(self.url):
+            self.scan_detect = False
+        else:
+            self.scan_detect = getattr(self, "scan_detect", False) or not _ or _[0] == str(self.output)
         self._cancel_library_scan()
         if self.closing or (self.worker and self.worker.is_alive()):
             return
@@ -41,7 +47,12 @@ class LibraryPreview:
 
     def _start_library_scan(self):
         self.scan_after = None
-        if self.worker and self.worker.is_alive():
+        if self.closing or (self.worker and self.worker.is_alive()):
+            return
+        if getattr(self, "scan_worker", None) and self.scan_worker.is_alive():
+            # A parser may still be finishing one file. Coalesce pending edits
+            # instead of starting another CPU-heavy scan on every text change.
+            self.scan_after = self.after(100, self._start_library_scan)
             return
         try:
             if not self.output.get().strip():
@@ -71,25 +82,35 @@ class LibraryPreview:
             return
         generation = self.scan_generation
         detect = self.scan_detect
+        self.scan_detect = False
         cancel = self.scan_cancel = threading.Event()
+        events, preview_cache = self.events, self.preview_cache
         def work():
             from library_inventory import scan_existing, detect_journal
             from library_store import state_dir
             from pdf_inventory import scan_pdfs
             from pdf_export import RENDERER_VERSION
+            checked_before = preview_cache.checked
+            last_notice = time.monotonic()
             def checkpoint():
+                nonlocal last_notice
                 if cancel.is_set():
                     raise Cancelled()
+                now = time.monotonic()
+                if now - last_notice >= .3:
+                    events.put({"kind": "library_scan_progress", "generation": generation,
+                                "checked": preview_cache.checked - checked_before})
+                    last_notice = now
             try:
                 detected = detect_journal(root) if detect else None
                 target = local_journal(detected["url"]) if detected else journal
                 if target is None:
-                    self.events.put({"kind": "library_preview", "generation": generation,
+                    events.put({"kind": "library_preview", "generation": generation,
                                      "error": "请选择目录中的期刊；自定义期刊将在开始时识别。"})
                     return
                 base = library_path(root, target or journal)
-                inventory = scan_existing(base, start, end, checkpoint)
-                pdfs = scan_pdfs(base, start, end, checkpoint)
+                inventory = scan_existing(base, start, end, checkpoint, preview_cache=preview_cache)
+                pdfs = scan_pdfs(base, start, end, checkpoint, preview_cache=preview_cache)
                 xml_dois, pdf_dois = set(inventory["saved"]), set(pdfs["saved"])
                 compatible = {doi for doi in pdf_dois if doi not in xml_dois or
                     pdfs["saved"][doi].get("xml_sha256") == inventory["saved"][doi]["sha256"]}
@@ -111,7 +132,7 @@ class LibraryPreview:
                         total = len(dois)
                         listed_saved = len(dois.intersection(complete))
                 checkpoint()
-                self.events.put({"kind": "library_preview", "generation": generation, "inventory": inventory,
+                events.put({"kind": "library_preview", "generation": generation, "inventory": inventory,
                                  "total": total, "listed_saved": listed_saved,
                                  "local_complete": len(complete), "candidate_total": candidate_total,
                                  "pdf_saved": len(compatible), "pdf_total": len(xml_dois | pdf_dois | pdfs["invalid_dois"])
@@ -121,9 +142,11 @@ class LibraryPreview:
             except Cancelled:
                 return
             except Exception:
-                self.events.put({"kind": "library_preview", "generation": generation,
+                events.put({"kind": "library_preview", "generation": generation,
                                  "error": "无法读取该保存位置，请检查目录权限后重试。"})
-        self.scan_worker = threading.Thread(target=work, daemon=True)
+        from app_runtime import background_call
+        self.scan_worker = threading.Thread(target=background_call, args=(work,), daemon=True,
+                                            name="library-preview")
         self.scan_worker.start()
 
     def _library_preview_event(self, event):

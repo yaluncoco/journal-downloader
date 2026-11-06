@@ -4,6 +4,10 @@ import sys
 
 
 def main():
+    if "--ui-check" in sys.argv:
+        from ui_check import run
+        run(Path(sys.argv[sys.argv.index("--ui-check") + 1]))
+        return
     if "--pdf-check" in sys.argv:
         from pdf_browser import diagnose
         from engine import ActionRequired

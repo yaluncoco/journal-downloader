@@ -36,11 +36,11 @@ def details(item):
 
 
 def category_matches(item, category):
+    if category == "全部学科":
+        return True
     subjects = details(item).get("subjects", [])
     primary = {s["primary"] for s in subjects}
     forestry = any(s["secondary"] == "Forestry" for s in subjects)
-    if category == "全部学科":
-        return True
     if category == "分类未收录":
         return not subjects
     if category == "林学":
@@ -53,6 +53,8 @@ def category_matches(item, category):
 
 
 def reference_matches(item, zone="全部分区", top=False):
+    if zone == "全部分区" and not top:
+        return True
     cas = details(item).get("cas2025", {})
     if top and not cas.get("top"):
         return False

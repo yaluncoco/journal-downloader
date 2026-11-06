@@ -62,9 +62,11 @@ def wrap_to(label, parent=None, padding=48, maximum=None):
 
 def scroll_body(window, *, row=0, padx=20, pady=12):
     import customtkinter as ctk
+    from ui_runtime import defer_canvas_paints
     body = ctk.CTkScrollableFrame(window, fg_color="transparent", corner_radius=0,
         scrollbar_button_color="#CEDAE3", scrollbar_button_hover_color="#9AAEBD")
     body._scrollbar.configure(width=7, corner_radius=4)
+    defer_canvas_paints(body._scrollbar)
     body.grid(row=row, column=0, sticky="nsew", padx=padx, pady=pady)
     body.grid_columnconfigure(0, weight=1)
     window.grid_columnconfigure(0, weight=1)

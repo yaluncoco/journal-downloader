@@ -46,7 +46,8 @@ def catalog():
 
 @lru_cache(maxsize=1)
 def search_index():
-    return tuple((item, tokens(item["name"]), tuple(tokens(a) for a in item.get("aliases", [])), item["issn"].replace("-", "").casefold())
+    return tuple((item, tokens(item["name"]), tuple(tokens(a) for a in item.get("aliases", [])),
+                  item["issn"].replace("-", "").casefold(), normalize(item["name"]))
                  for item in catalog()["journals"])
 
 
@@ -59,7 +60,7 @@ def search(query="", scope="全部", category="全部学科", zone="全部分区
     if query.strip() and not words:
         return []
     result = []
-    for item, title, aliases, issn in search_index():
+    for item, title, aliases, issn, sort_name in search_index():
         if scope == "在刊" and item["status"] != "Active":
             continue
         if scope == "历史刊名" and item["status"] in ("Active", "Forthcoming"):
@@ -82,7 +83,7 @@ def search(query="", scope="全部", category="全部学科", zone="全部分区
             if not ranks:
                 continue
             rank = min(ranks)
-        result.append((rank, item["status"] != "Active", normalize(item["name"]), item))
+        result.append((rank, item["status"] != "Active", sort_name, item))
     return [entry[-1] for entry in sorted(result, key=lambda entry: entry[:3])]
 
 

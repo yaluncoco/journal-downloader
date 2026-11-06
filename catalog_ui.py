@@ -1,10 +1,12 @@
 """Paged local journal search; no network call while typing."""
 import tkinter as tk
+import time
 import customtkinter as ctk
 
 from journal_catalog import catalog, search, status_label
 from journal_metadata import CATEGORY_OPTIONS, ZONE_OPTIONS, reference_label, subject_label
 from window_layout import fit_window, wrap_to
+from ui_runtime import defer_canvas_paints
 
 
 class CatalogUI:
@@ -16,6 +18,7 @@ class CatalogUI:
             return
         from ui import BG, INK, MUTED, TEAL, PALE, FONT
         win = self.catalog_window = ctk.CTkToplevel(self, fg_color=BG)
+        win.attributes("-alpha", self.attributes("-alpha"))
         win.title("检索 Elsevier 期刊")
         win.transient(self)
         fit_window(win, (900, 700), (420, 420))
@@ -127,6 +130,9 @@ class CatalogUI:
         navigation.grid(row=1, column=1, sticky="e")
         page_text = tk.StringVar()
         def move(step):
+            if rendered_generation[0] != generation[0]:
+                return
+            generation[0] += 1
             self.catalog_page += step
             render()
         previous = self.secondary(navigation, "‹", lambda: move(-1), width=30)
@@ -135,16 +141,23 @@ class CatalogUI:
         self.label(navigation, textvariable=page_text, font=self.small_font, color=MUTED).pack(side="right", padx=8)
         previous.pack(side="right")
         timer = [None]
-        def choose(item):
-            if self.worker and self.worker.is_alive():
+        render_timer = [None]
+        cards = []
+        generation = [0]
+        rendered_generation = [-1]
+        empty = wrap_to(self.label(results, "未找到匹配期刊，试试缩短关键词或输入 ISSN。", color=MUTED), padding=30)
+        def choose(item, token):
+            if (self.worker and self.worker.is_alive()) or token != generation[0]:
                 return
             self.issn.set("")
             self.url.set(item["url"])
             self._select_from_url()
             win.destroy()
         def render():
-            for child in results.winfo_children():
-                child.destroy()
+            if render_timer[0]:
+                win.after_cancel(render_timer[0])
+                render_timer[0] = None
+            empty.grid_forget()
             count = len(self.catalog_matches)
             pages = max(1, (count + 29) // 30)
             self.catalog_page = min(max(0, self.catalog_page), pages - 1)
@@ -152,41 +165,86 @@ class CatalogUI:
             page_text.set(f"{self.catalog_page + 1} / {pages}")
             previous.configure(state="normal" if self.catalog_page else "disabled")
             following.configure(state="normal" if self.catalog_page + 1 < pages else "disabled")
-            for row, item in enumerate(self.catalog_matches[self.catalog_page * 30:(self.catalog_page + 1) * 30]):
+            rows = self.catalog_matches[self.catalog_page * 30:(self.catalog_page + 1) * 30]
+            for card in cards[len(rows):]:
+                card[0].grid_forget()
+            rendered_generation[0] = generation[0]
+            token = generation[0]
+            results._parent_canvas.yview_moveto(0)
+            if not count:
+                empty.grid(padx=15, pady=30)
+            index = [0]
+            def make_card():
                 block = ctk.CTkFrame(results, fg_color="#F5F8FA", corner_radius=10)
-                block.grid(row=row, column=0, sticky="ew", padx=4, pady=4)
                 block.grid_columnconfigure(0, weight=1)
-                title = wrap_to(self.label(block, item["name"], font=self.body_font, justify="left"), padding=110)
+                title = wrap_to(self.label(block, "", font=self.body_font, justify="left"), padding=110)
                 title.grid(row=0, column=0, sticky="w", padx=12, pady=(10, 3))
-                detail = wrap_to(self.label(block, f"{item['issn'] or 'ISSN 待公布'}  ·  {status_label(item['status'])}  ·  {subject_label(item)}",
+                detail = wrap_to(self.label(block, "",
                     font=self.small_font, color=MUTED, justify="left"), padding=110)
                 detail.grid(row=1, column=0, sticky="w", padx=12, pady=(0, 3))
-                wrap_to(self.label(block, reference_label(item), font=self.small_font, color=TEAL,
-                    justify="left"), padding=110).grid(row=2, column=0, sticky="w", padx=12, pady=(0, 10))
-                ctk.CTkButton(block, text="选择", command=lambda value=item: choose(value), width=56,
+                reference = wrap_to(self.label(block, "", font=self.small_font, color=TEAL,
+                    justify="left"), padding=110)
+                reference.grid(row=2, column=0, sticky="w", padx=12, pady=(0, 10))
+                button = ctk.CTkButton(block, text="选择", width=56,
                     height=30, fg_color=PALE, hover_color="#D3EEEE", text_color=TEAL,
-                    font=self.small_font).grid(row=0, column=1, rowspan=3, padx=12)
-            if not count:
-                wrap_to(self.label(results, "未找到匹配期刊，试试缩短关键词或输入 ISSN。", color=MUTED), padding=30).grid(padx=15, pady=30)
-            results._parent_canvas.yview_moveto(0)
+                    font=self.small_font)
+                button.grid(row=0, column=1, rowspan=3, padx=12)
+                return block, title, detail, reference, button
+            def next_batch():
+                render_timer[0] = None
+                deadline = time.perf_counter() + .006
+                while index[0] < len(rows):
+                    row, item = index[0], rows[index[0]]
+                    if row == len(cards):
+                        cards.append(make_card())
+                    block, title, detail, reference, button = cards[row]
+                    title.configure(text=item["name"])
+                    detail.configure(text=f"{item['issn'] or 'ISSN 待公布'}  ·  {status_label(item['status'])}  ·  {subject_label(item)}")
+                    reference.configure(text=reference_label(item))
+                    button.configure(command=lambda value=item, version=token: choose(value, version))
+                    if not block.winfo_manager():
+                        block.grid(row=row, column=0, sticky="ew", padx=4, pady=4)
+                    index[0] += 1
+                    if time.perf_counter() >= deadline:
+                        break
+                if index[0] < len(rows):
+                    # Let Tk paint and process keyboard/mouse events between slices.
+                    render_timer[0] = win.after(12, next_batch)
+            next_batch()
         def refresh(*_):
+            generation[0] += 1
             if timer[0]:
                 win.after_cancel(timer[0])
+            if render_timer[0]:
+                win.after_cancel(render_timer[0])
+                render_timer[0] = None
+            result_text.set("正在检索…")
             def apply():
                 timer[0] = None
+                # The precomputed local index is fast enough for one UI slice.
+                # Keep allocations on the Tk thread: a search worker can trigger
+                # cyclic GC of closed dialogs and finalize Tcl variables off-thread.
+                try:
+                    self.catalog_matches = search(query.get(), scope.get(), category.get(), zone.get(), top.get())
+                except (OSError, ValueError, KeyError):
+                    result_text.set("目录无法读取，请重新安装软件。")
+                    return
                 self.catalog_page = 0
-                self.catalog_matches = search(query.get(), scope.get(), category.get(), zone.get(), top.get())
                 render()
             timer[0] = win.after(180, apply)
         query.trace_add("write", refresh)
         def destroy(event):
-            if event.widget == win and timer[0]:
-                win.after_cancel(timer[0])
-                timer[0] = None
+            if event.widget == win:
+                generation[0] += 1
+                for handle in (timer, render_timer):
+                    if handle[0]:
+                        win.after_cancel(handle[0])
+                        handle[0] = None
         win.bind("<Destroy>", destroy)
         win.bind("<Configure>", resize_filters, add="+")
         entry.bind("<Escape>", lambda _: win.destroy())
         entry.focus_set()
+        defer_canvas_paints(win)
         refresh()
 
     def _catalog_sources(self):
