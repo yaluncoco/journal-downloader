@@ -66,6 +66,7 @@ class BrowserTests(unittest.TestCase):
         with patch("pdf_browser.render_pdf", side_effect=[b"bad PDF", sample_pdf(PROBE_DOI)]):
             with self.assertRaisesRegex(ValueError, "本篇 PDF"):
                 self.renderer.render("bad document", "10.1016/example")
+        self.assertFalse(load_json(self.renderer.report)["ok"], "A good probe cannot certify a failed article")
 
     def test_runtime_falls_back_and_reuses_working_browser(self):
         self.renderer.selected = Path("edge")
@@ -119,6 +120,28 @@ class BrowserTests(unittest.TestCase):
         with patch.object(sys, '_MEIPASS', str(bundle), create=True), \
              patch.dict(os.environ, {'PATH': os.pathsep.join([str(bundle), str(bundle / 'extra'), str(outside)])}):
             self.assertEqual(independent_environment()['PATH'], str(outside))
+
+    def test_workspace_creation_failure_is_recorded_instead_of_escaping_diagnostics(self):
+        with patch("pdf_browser.browsers", return_value=[Path("edge.exe")]), \
+             patch("pdf_browser.print_workspace", side_effect=OSError("Temporary directory is unavailable")):
+            with self.assertRaises(ActionRequired):
+                self.renderer.ensure_ready()
+        report = load_json(self.renderer.report)
+        self.assertFalse(report['ok'])
+        self.assertIn('Temporary directory is unavailable', report['attempts'][0]['error'])
+
+    def test_long_and_unwritable_temp_roots_fall_back_without_permissions_change(self):
+        from pdf_workspace import print_workspace
+        blocked = self.root / 'file-not-directory'
+        blocked.write_text('keep')
+        long_root = self.root / ('long-' * 45)
+        fallback = self.root / 'short'
+        with patch('pdf_workspace.workspace_roots', return_value=[long_root, blocked, fallback]):
+            with print_workspace() as work:
+                self.assertEqual(work.parent, fallback.resolve())
+                (work / 'test.html').write_text('test')
+            self.assertFalse(work.exists())
+        self.assertEqual(blocked.read_text(), 'keep')
 
 
 if __name__ == "__main__":

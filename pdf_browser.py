@@ -1,5 +1,6 @@
 """Isolated browser printing with offline preflight and durable diagnostics."""
 from contextlib import suppress
+import ctypes
 import os
 from pathlib import Path
 import platform
@@ -7,15 +8,37 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 
 from app_runtime import clean_dll_search_path, independent_environment
 from engine import ActionRequired, Cancelled, Control, VERSION, save_json, timestamp
+from pdf_workspace import print_workspace
 
 PROBE_DOI = "10.0000/journal-downloader.pdf-check"
 PROBE = ('<!doctype html><html><meta charset="utf-8"><body>'
          '<h1>PDF environment check</h1><p>' + PROBE_DOI + '</p></body></html>')
+
+
+def browser_version(path):
+    if os.name != "nt":
+        return None
+    try:
+        version = ctypes.windll.version
+        size = version.GetFileVersionInfoSizeW(str(path), None)
+        if not size:
+            return None
+        data = ctypes.create_string_buffer(size)
+        if not version.GetFileVersionInfoW(str(path), 0, size, data):
+            return None
+        pointer, length = ctypes.c_void_p(), ctypes.c_uint()
+        if not version.VerQueryValueW(data, "\\", ctypes.byref(pointer), ctypes.byref(length)) or length.value < 52:
+            return None
+        values = ctypes.cast(pointer, ctypes.POINTER(ctypes.c_uint32 * 13)).contents
+        if values[0] != 0xFEEF04BD:
+            return None
+        return ".".join(str(n) for n in (values[2] >> 16, values[2] & 65535, values[3] >> 16, values[3] & 65535))
+    except (OSError, ValueError):
+        return None
 
 
 def browsers():
@@ -101,10 +124,15 @@ class BrowserRenderer:
         self.selected = None
         self.candidates = None
         self.attempts = []
+        self.versions = {}
 
     def _save(self, ok):
+        for browser in self.candidates or []:
+            if str(browser) not in self.versions:
+                self.versions[str(browser)] = browser_version(browser)
         save_json(self.report, {"version": VERSION, "checked_at": timestamp(), "ok": ok,
             "platform": platform.platform(), "frozen": bool(getattr(sys, "frozen", False)),
+            "application": sys.executable, "browser_versions": self.versions,
             "selected_browser": str(self.selected) if self.selected else None,
             "candidates": [str(path) for path in self.candidates or []], "attempts": self.attempts[-20:]})
 
@@ -114,30 +142,33 @@ class BrowserRenderer:
         # Use the OS local temp directory, independent of the paper library and
         # read-only installation folder; no profile belonging to the user is used.
         record = {"browser": str(browser), "phase": phase, "time": timestamp()}
-        with tempfile.TemporaryDirectory(prefix="journal-pdf-", ignore_cleanup_errors=True) as tmp:
-            work = Path(tmp)
-            try:
-                data = render_pdf(document, browser, work, self.control)
-                record["pages"] = validate_pdf(data, doi)
+        try:
+            with print_workspace() as work:
+                record["work_directory"] = str(work)
+                try:
+                    data = render_pdf(document, browser, work, self.control)
+                    record["pages"] = validate_pdf(data, doi)
+                except Exception:
+                    with suppress(OSError):
+                        with (work / "browser.log").open("rb") as log:
+                            log.seek(max(0, log.seek(0, 2) - 8000))
+                            stderr = log.read().decode("utf-8", errors="replace")
+                        record["stderr"] = re.sub(r"(?i)(apikey|api_key|token|authorization)([=: ]+)[^\s&]+",
+                                                   r"\1\2[hidden]", stderr)
+                    raise
                 record["ok"] = True
                 return data
-            except Cancelled:
-                raise
-            except Exception as error:
-                record.update(ok=False, error=str(error), returncode=getattr(error, "returncode", None))
-                with suppress(OSError):
-                    with (work / "browser.log").open("rb") as log:
-                        log.seek(max(0, log.seek(0, 2) - 8000))
-                        stderr = log.read().decode("utf-8", errors="replace")
-                    # No HTML, API keys or credentials are ever passed to the
-                    # browser. Strip incidental URL tokens from diagnostics too.
-                    record["stderr"] = re.sub(r"(?i)(apikey|api_key|token|authorization)([=: ]+)[^\s&]+",
-                                               r"\1\2[hidden]", stderr)
-                raise BrowserFailure(record["error"], record["returncode"]) from error
-            finally:
-                if "ok" in record:
-                    self.attempts.append(record)
-                    self._save(record["ok"])
+        except Cancelled:
+            raise
+        except Exception as error:
+            record.update(ok=False, error=str(error), returncode=getattr(error, "returncode", None))
+            if isinstance(record["returncode"], int):
+                record["returncode_hex"] = f"0x{record['returncode'] & 0xFFFFFFFF:08X}"
+            raise BrowserFailure(record["error"], record["returncode"]) from error
+        finally:
+            if "ok" in record:
+                self.attempts.append(record)
+                self._save(record["ok"])
 
     def ensure_ready(self, force=False):
         if self.selected is not None and not force:
@@ -178,6 +209,7 @@ class BrowserRenderer:
         # Distinguish a bad article from a broken system before repeating failures
         # across an entire library. Only a working probe permits the batch to go on.
         self.ensure_ready(force=True)
+        self._save(False)  # A successful probe does not make the failed article complete.
         raise ValueError(f"本篇 PDF 未通过校验，浏览器环境正常，XML 已保留。诊断文件：{self.report}")
 
 
