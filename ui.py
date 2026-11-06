@@ -10,6 +10,7 @@ from controller import Controller, SETTINGS_DIR
 from update_ui import UpdateUI
 from catalog_ui import CatalogUI
 from engine import PRESETS, VERSION, load_json, parse_journal_url, local_journal
+from window_layout import fit_window, wrap_to, scroll_body, work_area
 
 BG = "#F4F7FA"
 WHITE = "#FFFFFF"
@@ -30,7 +31,7 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         self.title("期刊全文下载器")
         self.assets = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
         self.geometry("1080x790")
-        self.minsize(960, 700)
+        self.minsize(420, 340)
         self.events = queue.Queue()
         self.worker = None
         self.control = None
@@ -50,6 +51,9 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         self.small_font = ctk.CTkFont(FONT, 12)
         self.bold_font = ctk.CTkFont(FONT, 15, weight="bold")
         self._layout()
+        self._layout_after = None
+        self._layout_mode = None
+        self.bind("<Configure>", self._schedule_layout, add="+")
         self._select_from_url()
         self._init_library_watch()
         self._report_update_result()
@@ -65,11 +69,56 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
             self.iconbitmap(str(self.assets / "app.ico"))
 
     def _fit_screen(self):
+        fit_window(self, (1080, 790))
+        self._schedule_layout()
+
+    def _schedule_layout(self, event=None):
+        if event is not None and event.widget != self:
+            return
+        if self._layout_after:
+            self.after_cancel(self._layout_after)
+        self._layout_after = self.after(80, self._responsive_layout)
+
+    def _responsive_layout(self):
+        self._layout_after = None
+        left, top, right, bottom = work_area(self)
         scale = self._get_window_scaling()
-        height = min(790, int(self.winfo_screenheight() / scale - 65))
-        width = min(1080, int(self.winfo_screenwidth() / scale - 50))
-        self.minsize(min(960, width), min(700, height))
-        self.geometry(f"{width}x{height}")
+        if self.state() == "normal" and (self.winfo_width() > right - left or
+                self.winfo_height() > bottom - top - 36 * scale):
+            fit_window(self, (int(self.winfo_width() / scale), int(self.winfo_height() / scale)))
+        width = self.winfo_width() / self.content._get_widget_scaling()
+        compact = width < 580
+        short = compact and self.winfo_height() / scale < 380
+        mode = (width < 920, compact, short)
+        if mode == self._layout_mode:
+            return
+        self._layout_mode = mode
+        stacked, compact, short = mode
+        self.content.grid_columnconfigure(1, minsize=0 if stacked else 290)
+        # Use CTk.grid(), not tkinter.grid_configure(): CTk replays its saved grid
+        # arguments when DPI changes. Otherwise it restores the original two columns.
+        self.form.grid(row=0, column=0, sticky="nsew", padx=(0, 0 if stacked else 16), pady=(0, 14))
+        self.sidebar.grid(row=1 if stacked else 0, column=0 if stacked else 1, sticky="nsew", pady=(0, 14))
+        self.log_card.grid(row=2 if stacked else 1, column=0, columnspan=1 if stacked else 2, sticky="ew", pady=(0, 8))
+        self.pdf_info.grid(row=0, column=0, columnspan=2 if stacked else 1, sticky="ew",
+                           padx=(20, 20), pady=(10, 4) if stacked else 14)
+        self.actions.grid(row=1 if stacked else 0, column=0 if stacked else 1,
+                          columnspan=2 if stacked else 1, sticky="e", padx=(10, 20), pady=(4, 12) if stacked else 12)
+        for button in self.action_buttons:
+            button.grid_forget()
+        for column in range(5):
+            self.actions.grid_columnconfigure(column, weight=0, minsize=0)
+        self.open_button.configure(text="文件夹" if short else "打开文件夹")
+        self.start_button.configure(text="开始" if short else "开始下载")
+        widths = (70, 70, 45, 45, 75) if short else (100, 110, 70, 70, 130)
+        for index, button in enumerate(self.action_buttons):
+            button.configure(width=widths[index])
+            if compact and not short:
+                row, column = divmod(index, 3)
+                span = 2 if index == 4 else 1
+            else:
+                row, column, span = 0, index, 1
+            button.grid(row=row, column=column, columnspan=span, sticky="ew", padx=2 if short else 4, pady=3)
 
     def label(self, parent, text="", *, font=None, color=INK, **kwargs):
         kwargs.setdefault("height", 20)
@@ -100,7 +149,8 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
             self.logo = ctk.CTkImage(Image.open(self.assets / "app.png"), size=(48, 48))
             ctk.CTkLabel(header, text="", image=self.logo, width=48).grid(row=0, column=0, rowspan=2, padx=(0, 14))
         self.label(header, "期刊全文下载器", font=ctk.CTkFont(FONT, 26, weight="bold")).grid(row=0, column=1, sticky="w")
-        self.label(header, "把文献收集交给工具，把时间留给研究。", font=self.small_font, color=MUTED).grid(row=1, column=1, sticky="w", pady=(3, 0))
+        wrap_to(self.label(header, "把文献收集交给工具，把时间留给研究。", font=self.small_font, color=MUTED),
+                header, padding=110).grid(row=1, column=1, sticky="w", pady=(3, 0))
         update_tools = ctk.CTkFrame(header, width=36, height=36, fg_color="transparent")
         update_tools.grid(row=0, column=2, rowspan=2, padx=(8, 0))
         arrow = Image.new("RGBA", (72, 72))
@@ -117,14 +167,14 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         self.update_badge.bind("<Button-1>", lambda event: self._update_dialog())
         self.update_available = False
 
-        content = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0,
+        content = self.content = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0,
             scrollbar_fg_color=BG, scrollbar_button_color="#CEDAE3", scrollbar_button_hover_color="#9AAEBD")
         content._scrollbar.configure(width=8, corner_radius=4)
         content.grid(row=1, column=0, sticky="nsew", padx=(24, 19))
         content.grid_columnconfigure(0, weight=1)
         content.grid_columnconfigure(1, weight=0, minsize=290)
 
-        form = self.card(content)
+        form = self.form = self.card(content)
         form.grid(row=0, column=0, sticky="nsew", padx=(0, 16), pady=(0, 14))
         form.grid_columnconfigure(0, weight=1)
         title = ctk.CTkFrame(form, fg_color="transparent")
@@ -166,13 +216,13 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         self.switch.grid(row=4, column=0, sticky="ew", padx=24, pady=(8, 6))
         # Selected text needs a light foreground; the widget uses one color for all labels.
         self.switch.configure(selected_color="#D3EEEE", selected_hover_color="#BFE4E5")
-        self.journal_label = self.label(form, "", font=self.small_font, color=TEAL, wraplength=540)
+        self.journal_label = wrap_to(self.label(form, "", font=self.small_font, color=TEAL, justify="left"), padding=50)
         self.journal_label.grid(row=5, column=0, sticky="w", padx=25, pady=(0, 10))
 
         self.url_entry = self.entry(form, self.url, placeholder_text="粘贴 ScienceDirect 期刊主页地址")
         self.url_entry.grid(row=6, column=0, sticky="ew", padx=24)
         self.url_entry.bind("<FocusOut>", lambda event: self._select_from_url())
-        self.label(form, "常用期刊快捷切换；其他期刊可检索目录或粘贴地址", font=self.small_font, color=MUTED).grid(row=7, column=0, sticky="w", padx=25, pady=(5, 17))
+        wrap_to(self.label(form, "常用期刊快捷切换；其他期刊可检索目录或粘贴地址", font=self.small_font, color=MUTED, justify="left"), padding=50).grid(row=7, column=0, sticky="w", padx=25, pady=(5, 17))
 
         line = ctk.CTkFrame(form, fg_color="transparent")
         line.grid(row=8, column=0, sticky="ew", padx=24)
@@ -189,8 +239,8 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         self.label(quantity, "本次下载", font=self.bold_font).pack(side="left", padx=(0, 16))
         self.entry(quantity, self.max_downloads, width=96, justify="center").pack(side="left")
         self.label(quantity, "篇", color=MUTED).pack(side="left", padx=10)
-        self.label(form, "0 表示不限；已有完整文件和失败请求不计入数量", font=self.small_font,
-            color=MUTED, wraplength=440).grid(row=11, column=0, sticky="w", padx=25, pady=(0, 16))
+        wrap_to(self.label(form, "0 表示不限；已有完整文件和失败请求不计入数量", font=self.small_font,
+            color=MUTED, justify="left"), padding=50).grid(row=11, column=0, sticky="w", padx=25, pady=(0, 16))
 
         self.label(form, "保存位置", font=self.bold_font).grid(row=12, column=0, sticky="w", padx=24)
         folder = ctk.CTkFrame(form, fg_color="transparent")
@@ -198,10 +248,10 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         folder.grid_columnconfigure(0, weight=1)
         self.entry(folder, self.output).grid(row=0, column=0, sticky="ew", padx=(0, 10))
         self.editable(self.secondary(folder, "选择", self._browse, width=62)).grid(row=0, column=1)
-        self.label(form, textvariable=self.local_hint, font=self.small_font, color=TEAL,
-            wraplength=500, justify="left").grid(row=14, column=0, sticky="w", padx=25, pady=(0, 18))
+        wrap_to(self.label(form, textvariable=self.local_hint, font=self.small_font, color=TEAL,
+            justify="left"), padding=50).grid(row=14, column=0, sticky="w", padx=25, pady=(0, 18))
 
-        right = ctk.CTkFrame(content, fg_color="transparent", width=290)
+        right = self.sidebar = ctk.CTkFrame(content, fg_color="transparent", width=290)
         right.grid(row=0, column=1, sticky="nsew", pady=(0, 14))
         right.grid_columnconfigure(0, weight=1)
         progress = self.card(right, width=290)
@@ -210,7 +260,8 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         status_line = ctk.CTkFrame(progress, fg_color="transparent")
         status_line.grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 13))
         self.label(status_line, "●", color=TEAL).pack(side="left", padx=(0, 7))
-        self.label(status_line, "", textvariable=self.status, font=self.bold_font).pack(side="left")
+        wrap_to(self.label(status_line, "", textvariable=self.status, font=self.bold_font, justify="left"),
+                padding=25).pack(side="left")
         big = ctk.CTkFrame(progress, fg_color="transparent")
         big.grid(row=1, column=0, sticky="ew", padx=20)
         self.label(big, "", textvariable=self.metrics["saved"], font=ctk.CTkFont("Segoe UI", 42, weight="bold"), color=INK).pack(side="left")
@@ -236,7 +287,7 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         self.label(info, "默认直连 Elsevier，自动校验与续传。\n临时断网会放缓重试，无需手动守候。", font=self.small_font,
             color="#5F858A", justify="left").pack(anchor="w", padx=18, pady=(0, 16))
 
-        log = self.card(content)
+        log = self.log_card = self.card(content)
         log.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 8))
         log.grid_columnconfigure(0, weight=1)
         self.label(log, "运行记录", font=self.bold_font).grid(row=0, column=0, sticky="w", padx=22, pady=(15, 5))
@@ -248,29 +299,32 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         self.logbox.configure(state="disabled")
         self._log("准备就绪。先获取论文列表，再校验已保存文件，随后下载缺少的全文。")
 
-        footer = ctk.CTkFrame(self, fg_color=WHITE, corner_radius=0, height=80)
+        footer = self.footer = ctk.CTkFrame(self, fg_color=WHITE, corner_radius=0, height=80)
         footer.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         footer.grid_columnconfigure(0, weight=1)
-        pdf_info = ctk.CTkFrame(footer, fg_color="transparent")
+        pdf_info = self.pdf_info = ctk.CTkFrame(footer, fg_color="transparent")
         pdf_info.grid(row=0, column=0, sticky="ew", padx=(26, 22), pady=14)
         pdf_info.grid_columnconfigure(0, weight=1)
-        self.label(pdf_info, textvariable=self.pdf_status, font=self.small_font, color=TEAL,
-            wraplength=280).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        wrap_to(self.label(pdf_info, textvariable=self.pdf_status, font=self.small_font, color=TEAL,
+            justify="left"), padding=0).grid(row=0, column=0, sticky="w", pady=(0, 8))
         self.pdf_progress = ctk.CTkProgressBar(pdf_info, height=6, width=180, corner_radius=3,
             fg_color="#EAF0F4", progress_color=TEAL)
         self.pdf_progress.set(0)
         self.pdf_progress.grid(row=1, column=0, sticky="ew")
-        self.secondary(footer, "打开文件夹", self.open_folder, width=100).grid(row=0, column=1, padx=(0, 8))
-        self.pdf_button = self.editable(self.secondary(footer, "合成 PDF", self._pdf_dialog, width=110))
+        actions = self.actions = ctk.CTkFrame(footer, fg_color="transparent")
+        actions.grid(row=0, column=1, sticky="e", padx=(10, 20), pady=12)
+        self.open_button = self.secondary(actions, "打开文件夹", self.open_folder, width=100)
+        self.pdf_button = self.editable(self.secondary(actions, "合成 PDF", self._pdf_dialog, width=110))
         self.pdf_button.grid(row=0, column=2, padx=(0, 8))
-        self.stop_button = self.secondary(footer, "停止", self.stop, width=70, state="disabled")
+        self.stop_button = self.secondary(actions, "停止", self.stop, width=70, state="disabled")
         self.stop_button.grid(row=0, column=3, padx=(0, 8))
-        self.pause_button = self.secondary(footer, "暂停", self.pause, width=70, state="disabled")
+        self.pause_button = self.secondary(actions, "暂停", self.pause, width=70, state="disabled")
         self.pause_button.grid(row=0, column=4, padx=(0, 10))
-        self.start_button = ctk.CTkButton(footer, text="开始下载", command=self.start, height=44,
+        self.start_button = ctk.CTkButton(actions, text="开始下载", command=self.start, height=44,
             width=130, corner_radius=12, fg_color=TEAL, hover_color=TEAL_HOVER, text_color=WHITE,
             font=self.bold_font)
         self.start_button.grid(row=0, column=5, padx=(0, 24), pady=16)
+        self.action_buttons = (self.open_button, self.pdf_button, self.stop_button, self.pause_button, self.start_button)
 
     def _output_options(self, parent):
         from article_filter import OUTPUT_MODES, FILTER_MODES
@@ -304,14 +358,14 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         win = ctk.CTkToplevel(self, fg_color=BG)
         self.pdf_window = win
         win.title("合成阅读版 PDF")
-        win.geometry("610x480")
-        win.resizable(False, False)
         win.transient(self)
+        fit_window(win, (610, 480))
         win.grid_columnconfigure(0, weight=1)
-        self.label(win, "把 XML 变成可阅读的论文", font=ctk.CTkFont(FONT, 22, weight="bold")).grid(row=0, column=0, sticky="w", padx=28, pady=(26, 7))
-        self.label(win, "补齐高清图片，保留正文、公式、表格与参考文献。", font=self.small_font, color=MUTED).grid(row=1, column=0, sticky="w", padx=28)
-        card = self.card(win)
-        card.grid(row=2, column=0, sticky="ew", padx=26, pady=20)
+        body = scroll_body(win)
+        wrap_to(self.label(body, "把 XML 变成可阅读的论文", font=ctk.CTkFont(FONT, 22, weight="bold")), padding=12).grid(row=0, column=0, sticky="w", padx=6, pady=(12, 7))
+        wrap_to(self.label(body, "补齐高清图片，保留正文、公式、表格与参考文献。", font=self.small_font, color=MUTED), padding=12).grid(row=1, column=0, sticky="w", padx=6)
+        card = self.card(body)
+        card.grid(row=2, column=0, sticky="ew", padx=4, pady=20)
         card.grid_columnconfigure(0, weight=1)
         initial = self.library or Path(self.output.get())
         if initial.name == "fulltext_pdf":
@@ -335,20 +389,20 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
             height=40, corner_radius=10, border_width=4, fg_color="#F0F4F7",
             selected_color="#D3EEEE", selected_hover_color="#BFE4E5", unselected_color="#F0F4F7",
             unselected_hover_color="#E0E9EF", text_color=INK, font=self.body_font).grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 20))
-        self.label(win, "使用主界面的 API Key 与网络设置；完整 PDF 会校验后跳过。\n输出到文库的 fulltext_pdf 文件夹。需要已安装 Edge 或 Chrome。\n生成的是 XML 重排阅读版，分页和细节可能与官方 PDF 不同。", font=self.small_font,
-                   color=MUTED, justify="left", wraplength=550).grid(row=3, column=0, sticky="w", padx=28)
+        wrap_to(self.label(body, "使用主界面的 API Key 与网络设置；完整 PDF 会校验后跳过。\n输出到文库的 fulltext_pdf 文件夹。需要已安装 Edge 或 Chrome。\n生成的是 XML 重排阅读版，分页和细节可能与官方 PDF 不同。", font=self.small_font,
+                   color=MUTED, justify="left"), padding=12).grid(row=3, column=0, sticky="w", padx=6)
         ctk.CTkButton(win, text="开始合成", height=44, width=140, corner_radius=12,
             fg_color=TEAL, hover_color=TEAL_HOVER, font=self.bold_font,
-            command=lambda: self.start_pdf(folder_var.get(), "double" if layout_var.get() == "期刊双栏" else "single")).grid(row=4, column=0, sticky="e", padx=28, pady=22)
+            command=lambda: self.start_pdf(folder_var.get(), "double" if layout_var.get() == "期刊双栏" else "single")).grid(row=1, column=0, sticky="e", padx=28, pady=(4, 16))
 
     def year_control(self, parent, variable):
         frame = ctk.CTkFrame(parent, fg_color="#F7F9FB", corner_radius=10, border_width=1, border_color=LINE)
         for column, (label, step) in enumerate((("−", -1), ("+", 1))):
-            button = ctk.CTkButton(frame, text=label, width=32, height=38, corner_radius=8,
+            button = ctk.CTkButton(frame, text=label, width=28, height=38, corner_radius=8,
                 fg_color="transparent", hover_color="#E6EFF3", text_color=MUTED, font=ctk.CTkFont(FONT, 18),
                 command=lambda v=variable, d=step: self._year_step(v, d))
             self.editable(button).grid(row=0, column=column * 2, padx=2, pady=2)
-        self.editable(ctk.CTkEntry(frame, textvariable=variable, width=68, height=36, justify="center",
+        self.editable(ctk.CTkEntry(frame, textvariable=variable, width=60, height=36, justify="center",
             fg_color="#F7F9FB", border_width=0, font=self.body_font, text_color=INK)).grid(row=0, column=1)
         return frame
 
@@ -382,23 +436,31 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         win = ctk.CTkToplevel(self, fg_color=BG)
         self.advanced_window = win
         win.title("高级设置")
-        win.geometry("540x380")
-        win.resizable(False, False)
         win.transient(self)
-        self.label(win, "高级设置", font=ctk.CTkFont(FONT, 22, weight="bold")).pack(anchor="w", padx=28, pady=(24, 12))
+        fit_window(win, (540, 420))
+        body = scroll_body(win)
+        self.label(body, "高级设置", font=ctk.CTkFont(FONT, 22, weight="bold")).grid(row=0, column=0, sticky="w", padx=6, pady=(12, 12))
+        row = 1
         for text, variable in (("直连 Elsevier（推荐，忽略系统 HTTP 代理）", self.direct),
                 ("更新论文列表，获取新发表的记录", self.refresh_index),
                 ("重新尝试之前无全文 / 失败 / 待检查的条目", self.retry_failed)):
-            check = ctk.CTkCheckBox(win, text=text, variable=variable, font=self.body_font, text_color=INK,
+            line = ctk.CTkFrame(body, fg_color="transparent")
+            line.grid(row=row, column=0, sticky="ew", padx=6, pady=10)
+            line.grid_columnconfigure(1, weight=1)
+            row += 1
+            check = ctk.CTkCheckBox(line, text="", variable=variable, width=22, font=self.body_font, text_color=INK,
                 checkbox_width=20, checkbox_height=20, corner_radius=6, border_width=1, border_color="#A7BBC7",
                 fg_color=TEAL, hover_color=TEAL_HOVER)
-            check.pack(anchor="w", padx=28, pady=10)
+            check.grid(row=0, column=0, sticky="n")
+            label = wrap_to(self.label(line, text, justify="left"), line, padding=38)
+            label.grid(row=0, column=1, sticky="w", padx=(10, 0))
+            label.bind("<Button-1>", lambda event, control=check: control.toggle())
             if self.worker and self.worker.is_alive():
                 check.configure(state="disabled")
-        self.label(win, "ISSN（无法自动识别期刊时填写）", font=self.small_font, color=MUTED).pack(anchor="w", padx=28, pady=(14, 6))
-        entry = ctk.CTkEntry(win, textvariable=self.issn, height=40, width=200, corner_radius=10,
+        wrap_to(self.label(body, "ISSN（无法自动识别期刊时填写）", font=self.small_font, color=MUTED), padding=12).grid(row=4, column=0, sticky="w", padx=6, pady=(14, 6))
+        entry = ctk.CTkEntry(body, textvariable=self.issn, height=40, width=200, corner_radius=10,
                 fg_color=WHITE, border_width=1, border_color=LINE, font=self.body_font)
-        entry.pack(anchor="w", padx=28)
+        entry.grid(row=5, column=0, sticky="w", padx=6)
         if self.worker and self.worker.is_alive():
             entry.configure(state="disabled")
-        self.secondary(win, "完成", win.destroy, width=100).pack(anchor="e", padx=28, pady=20)
+        self.secondary(win, "完成", win.destroy, width=100).grid(row=1, column=0, sticky="e", padx=28, pady=(4, 16))

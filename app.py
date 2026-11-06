@@ -25,6 +25,8 @@ def main():
             save_json(state_dir(output) / "offline_export_result.json", {"ok": False, "error": str(error)})
         return
     from ui import App
+    from app_runtime import hold_app_mutex
+    mutex = hold_app_mutex()
     App().mainloop()
 
 

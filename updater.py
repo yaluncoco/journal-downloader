@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -11,14 +13,15 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
-import uuid
+import urllib.error
 
-from engine import Control, VERSION, atomic_bytes
+from engine import Control, VERSION, save_json
+from app_runtime import independent_environment, clean_dll_search_path
 
 REPOSITORY = "yaluncoco/journal-downloader"
 LATEST = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
-ASSET = "JournalDownloader.exe"
-MAX_EXE_SIZE = 150 * 1024 * 1024
+ASSET = "JournalDownloader-Setup.exe"
+MAX_EXE_SIZE = 200 * 1024 * 1024
 UPDATE_HOSTS = {"api.github.com", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}
 
 
@@ -53,6 +56,10 @@ class Release:
     digest: str
 
 
+class IncompleteDownload(ValueError):
+    pass
+
+
 class Updater:
     def __init__(self, control=None, progress=lambda text: None):
         self.control = control or Control()
@@ -61,6 +68,20 @@ class Updater:
         self.opener = urllib.request.build_opener(UpdateRedirect())
 
     def read(self, url, limit, destination=None, expected_size=None):
+        for attempt in range(3):
+            try:
+                return self._read_once(url, limit, destination, expected_size)
+            except urllib.error.HTTPError as error:
+                if error.code not in {408, 429, 500, 502, 503, 504} or attempt == 2:
+                    raise
+            except (urllib.error.URLError, TimeoutError, ConnectionError,
+                    http.client.IncompleteRead, IncompleteDownload):
+                if attempt == 2:
+                    raise
+            self.progress(f"连接中断，正在重试（{attempt + 1}/2）…")
+            self.control.wait(2 ** (attempt + 1))
+
+    def _read_once(self, url, limit, destination=None, expected_size=None):
         request = urllib.request.Request(safe_url(url), headers={
             "User-Agent": f"JournalDownloader/{VERSION}", "Accept": "application/octet-stream" if destination else "application/json"})
         self.control.checkpoint()
@@ -83,7 +104,7 @@ class Updater:
                         pieces.append(chunk)
                 length = response.headers.get("Content-Length", "")
                 if (length.isdigit() and size != int(length)) or (expected_size is not None and size != expected_size):
-                    raise ValueError("更新文件下载不完整，请重试。")
+                    raise IncompleteDownload("更新文件下载不完整，请重试。")
             finally:
                 if handle:
                     handle.close()
@@ -101,7 +122,7 @@ class Updater:
         assets = {item.get("name"): item for item in data.get("assets", [])}
         exe, checksum = assets.get(ASSET), assets.get("SHA256.txt")
         if not exe or not checksum:
-            raise ValueError("该版本缺少 EXE 或校验文件，请稍后重试。")
+            raise ValueError("该版本缺少安装包或校验文件，请到 GitHub Releases 下载安装版。")
         prefix = f"https://github.com/{REPOSITORY}/releases/download/{tag}/"
         if exe.get("browser_download_url") != prefix + ASSET or checksum.get("browser_download_url") != prefix + "SHA256.txt":
             raise ValueError("更新附件来源校验失败。")
@@ -142,97 +163,65 @@ class Updater:
         return target, expected[0]
 
 
-def prepare_install(downloaded, expected_sha, target=None, wait_pid=None, launch=True):
-    """Write a reviewable updater script; caller launches it only after user clicks Update."""
-    target = Path(target or sys.executable).resolve()
+def prepare_install(downloaded, expected_sha, tag, target=None):
+    """Validate Setup again and prepare an interactive, logged installation."""
+    version_tuple(tag)
     downloaded = Path(downloaded).resolve()
-    if target == downloaded or target.suffix.lower() != ".exe" or not target.is_file():
-        raise ValueError("无法确定需要更新的 EXE。")
     if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
         raise ValueError("更新摘要无效。")
-    if hashlib.sha256(downloaded.read_bytes()).hexdigest() != expected_sha:
+    data = downloaded.read_bytes()
+    if not data.startswith(b"MZ") or hashlib.sha256(data).hexdigest() != expected_sha:
         raise ValueError("待安装文件已发生变化。")
-    token = uuid.uuid4().hex[:12]
-    # Verify write access before closing the user's app.
-    probe = target.parent / (".journal-update-" + token + ".probe")
+    executable = Path(target or sys.executable).resolve()
+    record = downloaded.parent / "installation-request.json"
+    log = downloaded.parent / "setup.log"
+    arguments = [str(downloaded), "/SP-", "/NORESTART", "/LOG=" + str(log)]
+    # Installed copies upgrade in place. Portable copies use Setup's normal destination.
+    if (executable.parent / "installation.ini").is_file() and (executable.parent / "unins000.exe").is_file():
+        arguments.append("/DIR=" + str(executable.parent))
+    save_json(record, {"version": tag, "source_exe": str(executable), "installer": str(downloaded),
+        "sha256": expected_sha, "log": str(log), "state": "ready",
+        "requested_at": datetime.now(timezone.utc).isoformat()})
+    return arguments, record
+
+
+def launch_install(arguments, record):
+    data = json.loads(Path(record).read_text(encoding="utf-8"))
+    if hashlib.sha256(Path(arguments[0]).read_bytes()).hexdigest() != data["sha256"]:
+        raise ValueError("待安装文件已发生变化。")
     try:
-        with probe.open("xb") as handle:
-            handle.write(b"write access check")
+        with clean_dll_search_path():
+            process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
+                env=independent_environment())
+    except OSError as error:
+        data.update(state="launch_failed", error=str(error))
+        save_json(record, data)
+        raise
+    data.update(state="installer_started", pid=process.pid)
+    try:
+        save_json(record, data)
     except OSError:
-        raise ValueError("程序所在文件夹无法写入。请把 EXE 放到有写入权限的文件夹后再更新。") from None
-    finally:
-        probe.unlink(missing_ok=True)
-    script = downloaded.parent / ("install-" + token + ".ps1")
-    atomic_bytes(script, ("\ufeff" + INSTALL_SCRIPT).encode("utf-8"))
-    result = downloaded.parent / "install-result.json"
-    powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-    arguments = [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script),
-                 "-TargetPath", str(target), "-NewPath", str(downloaded), "-ExpectedSha", expected_sha,
-                 "-WaitPid", str(os.getpid() if wait_pid is None else wait_pid), "-Token", token,
-                 "-ResultPath", str(result)]
-    if not launch:
-        arguments.append("-NoLaunch")
-    return arguments, result
+        pass  # Setup already started; don't launch a second copy after a log failure.
+    return process
 
 
-def launch_install(arguments):
-    environment = os.environ.copy()
-    environment.pop("PSModulePath", None)  # Do not inherit PowerShell 7's incompatible module path.
-    return subprocess.Popen(arguments, creationflags=subprocess.CREATE_NO_WINDOW,
-                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            close_fds=True, env=environment)
-
-
-INSTALL_SCRIPT = r'''
-param([string]$TargetPath, [string]$NewPath, [string]$ExpectedSha, [int]$WaitPid,
-      [string]$Token, [string]$ResultPath, [switch]$NoLaunch)
-$ErrorActionPreference = 'Stop'
-$targetFull = [IO.Path]::GetFullPath($TargetPath)
-$targetDir = [IO.Path]::GetDirectoryName($targetFull)
-$incoming = Join-Path $targetDir ('.journal-update-' + $Token + '.exe')
-$backup = $targetFull + '.previous-' + $Token
-$movedOld = $false
-$installedNew = $false
-function Get-UpdateHash([string]$FilePath) {
-    $stream = [IO.File]::OpenRead($FilePath)
-    $algorithm = [Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
-    finally { $stream.Dispose(); $algorithm.Dispose() }
-}
-try {
-    if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($incoming)) -ne $targetDir) { throw 'Invalid staging path' }
-    if ((Get-UpdateHash $NewPath) -ne $ExpectedSha) { throw 'Update hash mismatch' }
-    Copy-Item -LiteralPath $NewPath -Destination $incoming
-    if ((Get-UpdateHash $incoming) -ne $ExpectedSha) { throw 'Staged file hash mismatch' }
-    $selfTest = Join-Path ([IO.Path]::GetDirectoryName($ResultPath)) ('self-test-' + $Token + '.json')
-    $testArgs = @('--self-test', ('"' + $selfTest + '"'))
-    $check = Start-Process -FilePath $incoming -ArgumentList $testArgs -PassThru -WindowStyle Hidden
-    if (-not $check.WaitForExit(60000)) { $check.Kill(); throw 'New version self-test timed out' }
-    if ($check.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $selfTest)) { throw 'New version self-test failed' }
-    $health = Get-Content -LiteralPath $selfTest -Raw -Encoding UTF8 | ConvertFrom-Json
-    if (-not $health.ok) { throw 'New version health check failed' }
-    $deadline = [DateTime]::UtcNow.AddMinutes(2)
-    while ($WaitPid -gt 0 -and (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue)) {
-        if ([DateTime]::UtcNow -gt $deadline) { throw 'Current application is still running' }
-        Start-Sleep -Milliseconds 400
-    }
-    for ($attempt = 0; $attempt -lt 30; $attempt++) {
-        try { Move-Item -LiteralPath $targetFull -Destination $backup; $movedOld = $true; break }
-        catch { if ($attempt -eq 29) { throw }; Start-Sleep -Milliseconds 500 }
-    }
-    Move-Item -LiteralPath $incoming -Destination $targetFull
-    $installedNew = $true
-    if (-not $NoLaunch) { Start-Process -FilePath $targetFull -WorkingDirectory $targetDir }
-    @{ok=$true; backup=$backup; target=$targetFull} | ConvertTo-Json | Set-Content -LiteralPath $ResultPath -Encoding UTF8
-} catch {
-    $failure = $_.Exception.Message
-    if ($movedOld) {
-        if ($installedNew -and (Test-Path -LiteralPath $targetFull)) { Remove-Item -LiteralPath $targetFull }
-        Move-Item -LiteralPath $backup -Destination $targetFull
-    }
-    @{ok=$false; error=$failure; target=$targetFull} | ConvertTo-Json | Set-Content -LiteralPath $ResultPath -Encoding UTF8
-    if (-not $NoLaunch -and (Test-Path -LiteralPath $targetFull)) { Start-Process -FilePath $targetFull -WorkingDirectory $targetDir }
-} finally {
-    if (Test-Path -LiteralPath $incoming) { Remove-Item -LiteralPath $incoming }
-}
-'''
+def installation_status(updates, current_version=VERSION, executable=None):
+    """Only a successfully started newer app can confirm completion."""
+    executable = Path(executable or sys.executable).resolve()
+    records = list(Path(updates).glob("*/installation-request.json"))
+    for record in sorted(records, key=lambda path: path.stat().st_mtime, reverse=True):
+        try:
+            data = json.loads(record.read_text(encoding="utf-8"))
+            if data.get("state") == "completed":
+                continue
+            requested = version_tuple(data["version"])
+            if requested <= version_tuple(current_version):
+                data.update(state="completed", running_version=current_version)
+                save_json(record, data)
+                return "complete", data
+            if Path(data.get("source_exe", "")).resolve() == executable:
+                return "pending", data
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return None, None

@@ -4,11 +4,13 @@
 
 常用入口保留 **Remote Sensing of Environment（RSE）** 与 **ISPRS Journal of Photogrammetry and Remote Sensing**。点击「检索全部期刊」可按英文名称、关键词或 ISSN 搜索内置目录，也支持粘贴期刊地址。
 
-**v1.5.0** 新增逐篇 XML→PDF、仅 PDF 输出、下载前题名词组筛选、当前目录 PDF 完整性统计，以及官方学科与 2025 中科院参考分区筛选。数据来源及 GitHub 示例参考见 [DATA_SOURCES.md](DATA_SOURCES.md)。
+**v1.6.0** 改为 Windows 安装版，更新通过安装向导完成。窗口按可用屏幕与 DPI 调整大小，窄窗口改为上下排列，检索和弹窗随窗口换行。首次从旧便携版迁移，请关闭旧程序并手动运行安装包一次；后续从开始菜单启动。
+
+v1.5.0 新增逐篇 XML→PDF、仅 PDF 输出、下载前题名词组筛选、当前目录 PDF 完整性统计，以及官方学科与 2025 中科院参考分区筛选。数据来源及 GitHub 示例参考见 [DATA_SOURCES.md](DATA_SOURCES.md)。
 
 ## 下载与使用
 
-在 [Releases](https://github.com/yaluncoco/journal-downloader/releases) 下载 `JournalDownloader-Windows-x64.zip`，解压后双击 `JournalDownloader.exe`。Windows 10/11 64 位，无需安装 Python。
+在 [Releases](https://github.com/yaluncoco/journal-downloader/releases) 下载 `JournalDownloader-Setup.exe`，运行安装向导后从开始菜单启动。Windows 10/11 64 位，无需安装 Python。
 
 1. 连接校园网或学校 VPN。
 2. 输入自己的 API Key，选择预置期刊或粘贴期刊网址。
@@ -17,7 +19,9 @@
 
 PDF 合成需要电脑已安装 Microsoft Edge 或 Google Chrome。程序使用独立的后台浏览器进程，不需要打开浏览器窗口或安装 Python。
 
-右上角向上箭头用于软件更新。启动后会在后台检查一次 GitHub 正式版本，有新版时显示红点；检查失败不影响下载。点击箭头可重新检查并选择「下载并更新」。只有确认后才会下载新版，下载校验和新版自检通过后自动替换并重启，文库和设置保持原位置。
+右上角向上箭头用于软件更新。启动后在后台检查一次正式版本，有新版显示红点。点击「下载并安装」后下载并验证 SHA-256，再关闭当前窗口、打开安装向导；完成安装后可启动新版。安装日志保存在 `%LOCALAPPDATA%\JournalXMLDownloader\updates\版本号\setup.log`。临时网络失败最多重试两次，下载校验失败不会执行安装。
+
+安装到当前用户目录，无需管理员权限，提供开始菜单、可选桌面快捷方式和卸载入口。安装、覆盖升级、卸载均保留论文和本机应用数据。程序仍在运行时安装器要求先关闭，不强制结束任务。旧便携 EXE 不会自动删除，也不要继续用它启动。
 
 支持的地址示例：
 
@@ -54,7 +58,8 @@ https://www.sciencedirect.com/search?pub=Remote+Sensing+of+Environment&date=2024
 - 彩色数字、文字等行内图片按文字字号排版，仍使用高清图片；表头与首行保持在一起，末尾比较行尽量同页。
 - 图片缓存解码与 SHA-256 校验；PDF 按 XML 哈希、版式、排版版本、文件哈希与可读取性校验后跳过。
 - 单篇缺图、XML 损坏或不支持的内容记录待处理，继续其他论文；再次合成可重试。
-- 紧凑的向上箭头更新入口、新版红点提示，下载 SHA-256 校验、新版启动自检、原程序备份及替换失败恢复。
+- 向上箭头更新入口、新版红点提示、安装包 SHA-256 校验、网络重试与安装日志；新版启动后才确认更新完成。
+- 适配屏幕工作区和 100%–200% DPI 缩放：宽屏双栏、窄屏上下排列，底部操作保持可见，长刊名自动换行。
 
 ## 范围说明
 
@@ -79,16 +84,16 @@ python -m venv .build-env
 ## 测试与构建
 
 ```powershell
-.\.build-env\Scripts\python.exe -m unittest -v test_engine test_controller test_pdf test_updater test_storage test_catalog test_inventory test_pipeline
-.\build.ps1
+.\.build-env\Scripts\python.exe -m unittest -v test_engine test_controller test_pdf test_updater test_storage test_catalog test_inventory test_pipeline test_layout
+.\build.ps1 -ISCC "C:\Program Files\Inno Setup 7\ISCC.exe"
 ```
 
-EXE 输出到 `release/JournalDownloader.exe`。XML 下载引擎使用 Python 标准库；界面使用 CustomTkinter，图片校验使用 Pillow，PDF 校验使用 pypdf，使用 PyInstaller 打包。浏览器不随程序分发。
+安装器编译需安装官方 Inno Setup 7。产物为 `release/v1.6.0/JournalDownloader-Setup.exe`；应用目录为 `release/v1.6.0/JournalDownloader/`。XML 下载引擎使用 Python 标准库；界面使用 CustomTkinter，图片校验使用 Pillow，PDF 校验使用 pypdf，使用 PyInstaller 打包。浏览器不随程序分发。
 
 打包后离线自检：
 
 ```powershell
-.\release\JournalDownloader.exe --self-test "$env:TEMP\journal-downloader-test.json"
+.\release\v1.6.0\JournalDownloader\JournalDownloader.exe --self-test "$env:TEMP\journal-downloader-test.json"
 ```
 
 加入 `--online` 可额外验证两个期刊的在线元数据查询，不需要真实 API Key。
@@ -97,7 +102,7 @@ EXE 输出到 `release/JournalDownloader.exe`。XML 下载引擎使用 Python �
 无网络批量合成（要求图片已缓存；API Key 不通过命令行传递）：
 
 ```powershell
-.\release\JournalDownloader.exe --pdf-export "D:\文库\fulltext_xml" "D:\文库\fulltext_pdf"
+.\release\v1.6.0\JournalDownloader\JournalDownloader.exe --pdf-export "D:\文库\fulltext_xml" "D:\文库\fulltext_pdf"
 ```
 
 结果保存在本机应用数据中的 `offline_export_result.json`，输出目录只放 PDF；可加 `--single-column` 改为单栏。首次获取图片请使用界面输入 Key。
@@ -106,7 +111,9 @@ EXE 输出到 `release/JournalDownloader.exe`。XML 下载引擎使用 Python �
 
 | 文件 | 用途 |
 | --- | --- |
-| `app.py` | 程序入口 |
+| `app.py`、`app_runtime.py` | 程序入口、安装器互斥与独立启动环境 |
+| `installer.iss`、`build_installer.py` | Windows 安装/卸载与可复现构建 |
+| `window_layout.py`、`test_layout.py` | DPI/工作区适配、响应布局与尺寸回归测试 |
 | `ui.py` | 界面布局与主题 |
 | `controller.py` | 工作线程、进度事件与设置 |
 | `engine.py` | 期刊识别、元数据索引、下载与重试 |
@@ -122,7 +129,7 @@ EXE 输出到 `release/JournalDownloader.exe`。XML 下载引擎使用 Python �
 | `pdf_assets.py` | 图片对象获取、重试与缓存校验 |
 | `pdf_document.py` | XML、CALS 表格、MathML 到安全排版 HTML |
 | `pdf_export.py` | PDF 批量合成、后台浏览器和断点校验 |
-| `updater.py`、`update_ui.py` | 手动检查版本、校验下载、替换及失败恢复 |
+| `updater.py`、`update_ui.py` | 检查版本、校验安装包、独立进程启动安装向导及完成记录 |
 | `test_engine.py`、`test_controller.py`、`test_pdf.py`、`test_updater.py`、`test_storage.py` | 引擎、界面、PDF、更新、数据迁移和 Key 加密测试 |
 | `smoke_test.py` | 打包程序自检 |
 

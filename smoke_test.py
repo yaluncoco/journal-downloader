@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 
-from engine import Config, Downloader, PRESETS, paths_for, save_json
+from engine import Config, Downloader, PRESETS, VERSION, paths_for, save_json
 
 
 def xml(doi="10.1016/j.demo.2024.123456", body=True):
@@ -32,7 +32,7 @@ def run(output, online=False, pdf=False):
 
 
 def _run(output, online=False, pdf=False):
-    results = {}
+    results = {"version": VERSION}
     try:
         import tkinter as tk
         root = tk.Tk()
