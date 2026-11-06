@@ -6,12 +6,17 @@ import queue
 import threading
 import tkinter as tk
 from tkinter import filedialog,messagebox
-from engine import (ActionRequired,Cancelled,Config,Control,Downloader,PRESETS,save_json,
-                    local_journal, library_path, load_json, Journal, parse_journal_url, valid_issn)
+from engine import ActionRequired, Cancelled, Config, Control, Downloader, PRESETS, save_json
 from credential_store import load_key, save_key, forget_key
 SETTINGS_DIR = Path(os.environ.get("LOCALAPPDATA",str(Path.home()))) / "JournalXMLDownloader"
+SETTING_FIELDS = {"url", "start_year", "end_year", "output", "network", "issn", "max_downloads",
+                  "remember_key", "output_mode", "title_filter", "filter_mode"}
 
-class Controller:
+from library_preview import LibraryPreview
+from article_filter import OUTPUT_MODES, FILTER_MODES
+
+
+class Controller(LibraryPreview):
     def _variables(self):
         self.remember_key = tk.BooleanVar(value=self.settings.get("remember_key", True))
         remembered = load_key(SETTINGS_DIR) if self.use_key_store and self.remember_key.get() else ""
@@ -22,6 +27,9 @@ class Controller:
         self.start_year = tk.StringVar(value=str(self.settings.get("start_year", 2024)))
         self.end_year = tk.StringVar(value=str(self.settings.get("end_year", 2027)))
         self.max_downloads = tk.StringVar(value=str(self.settings.get("max_downloads", 0)))
+        self.output_mode = tk.StringVar(value=next((label for label, mode in OUTPUT_MODES.items() if mode == self.settings.get("output_mode")), "仅 XML"))
+        self.title_filter = tk.StringVar(value=self.settings.get("title_filter", ""))
+        self.filter_mode = tk.StringVar(value=next((label for label, mode in FILTER_MODES.items() if mode == self.settings.get("filter_mode")), "任一词组"))
         self.output = tk.StringVar(value=self.settings.get("output", str(Path.home() / "Documents" / "期刊全文下载")))
         self.direct = tk.BooleanVar(value=self.settings.get("network", "direct") != "system")
         self.issn = tk.StringVar(value=self.settings.get("issn", ""))
@@ -35,134 +43,6 @@ class Controller:
         self.active_job = "xml"
         self.local_hint = tk.StringVar(value="正在读取保存位置…")
         self.pdf_status = tk.StringVar(value="PDF · 尚未合成")
-
-    def _init_library_watch(self):
-        self.scan_generation = 0
-        self.scan_after = None
-        self.scan_cancel = None
-        if not self.scan_libraries:
-            return
-        for variable in (self.output, self.url, self.start_year, self.end_year, self.issn):
-            variable.trace_add("write", self._queue_library_scan)
-        self._queue_library_scan()
-
-    def _cancel_library_scan(self):
-        self.scan_generation = getattr(self, "scan_generation", 0) + 1
-        if getattr(self, "scan_after", None):
-            self.after_cancel(self.scan_after)
-            self.scan_after = None
-        if getattr(self, "scan_cancel", None):
-            self.scan_cancel.set()
-
-    def _queue_library_scan(self, *_):
-        self.scan_detect = not _ or _[0] == str(self.output)
-        self._cancel_library_scan()
-        if self.closing or (self.worker and self.worker.is_alive()):
-            return
-        self.library = None
-        self.local_hint.set("正在读取保存位置…")
-        self.scan_after = self.after(450, self._start_library_scan)
-
-    def _start_library_scan(self):
-        self.scan_after = None
-        if self.worker and self.worker.is_alive():
-            return
-        try:
-            if not self.output.get().strip():
-                raise ValueError("请选择保存位置。")
-            start, end = int(self.start_year.get()), int(self.end_year.get())
-            if not 1800 <= start <= end <= 2100:
-                raise ValueError("请填写有效的年份范围。")
-            try:
-                journal = local_journal(self.url.get())
-            except ValueError:
-                journal = None
-            if not journal and valid_issn(self.issn.get()):
-                slug, name = parse_journal_url(self.url.get())
-                journal = Journal(name, slug, self.issn.get().upper())
-            if not journal and not self.scan_detect:
-                self.local_hint.set("请选择目录中的期刊；自定义期刊将在开始时识别。")
-                self.library = None
-                return
-            root = Path(self.output.get().strip()).expanduser()
-        except (OSError, ValueError) as error:
-            self.local_hint.set(str(error))
-            self.library = None
-            return
-        generation = self.scan_generation
-        detect = self.scan_detect
-        cancel = self.scan_cancel = threading.Event()
-        def work():
-            from library_inventory import scan_existing, detect_journal
-            from library_store import state_dir
-            def checkpoint():
-                if cancel.is_set():
-                    raise Cancelled()
-            try:
-                detected = detect_journal(root) if detect else None
-                target = local_journal(detected["url"]) if detected else journal
-                if target is None:
-                    self.events.put({"kind": "library_preview", "generation": generation,
-                                     "error": "请选择目录中的期刊；自定义期刊将在开始时识别。"})
-                    return
-                base = library_path(root, target or journal)
-                inventory = scan_existing(base, start, end, checkpoint)
-                cache = load_json(state_dir(base) / "indexes" / f"{start}-{end}.json", {})
-                if not cache:
-                    cache = load_json(base / "indexes" / f"{start}-{end}.json", {})
-                total = None
-                listed_saved = 0
-                if (isinstance(cache, dict) and cache.get("complete") is True and cache.get("issn") == (target or journal).issn
-                        and cache.get("years") == [start, end] and isinstance(cache.get("records"), list)):
-                    rows = cache["records"]
-                    if all(isinstance(row, dict) and isinstance(row.get("doi"), str) for row in rows):
-                        dois = {row["doi"].lower() for row in rows}
-                        total = len(dois)
-                        listed_saved = len(dois.intersection(inventory["saved"]))
-                checkpoint()
-                self.events.put({"kind": "library_preview", "generation": generation, "inventory": inventory,
-                                 "total": total, "listed_saved": listed_saved,
-                                 "detected_url": detected["url"] if detected else ""})
-            except Cancelled:
-                return
-            except Exception:
-                self.events.put({"kind": "library_preview", "generation": generation,
-                                 "error": "无法读取该保存位置，请检查目录权限后重试。"})
-        self.scan_worker = threading.Thread(target=work, daemon=True)
-        self.scan_worker.start()
-
-    def _library_preview_event(self, event):
-        if event["generation"] != self.scan_generation or (self.worker and self.worker.is_alive()) or self.closing:
-            return
-        if event.get("error"):
-            self.local_hint.set(event["error"])
-            return
-        try:
-            selected = local_journal(self.url.get())
-        except ValueError:
-            selected = None
-        if event.get("detected_url") and local_journal(event["detected_url"]) != selected:
-            self.issn.set("")
-            self.url.set(event["detected_url"])
-            self._select_from_url()
-            # The current scan already validated the detected library.
-            self._cancel_library_scan()
-        info = event["inventory"]
-        count, bad = len(info["saved"]), info["invalid"]
-        self.library = Path(info["base"])
-        self.local_hint.set(f"已识别 {count} 篇完整 XML" + (f" · {bad} 个文件待检查" if bad else "") + " · 开始后自动续传")
-        total = event["total"]
-        self.saved_caption.set("本地完整 XML")
-        self.metrics["saved"].set(str(count))
-        self.metrics["reused"].set(str(count))
-        self.metrics["total"].set(str(total) if total is not None else "待获取")
-        self.metrics["pending"].set(str(max(0, total - event["listed_saved"])) if total is not None else "待获取")
-        self.progress.stop()
-        self.progress.configure(mode="determinate")
-        self.progress.set(event["listed_saved"] / max(1, total) if total is not None else 0)
-        self.percent.set(f"{event['listed_saved'] / total:.0%}" if total else "本地已读取")
-        self.status.set("可继续下载" if count else "准备就绪")
-        self.detail.set("开始后复用已有列表并校验 XML，完整论文会跳过；缺失或损坏的论文继续下载。")
 
     def editable(self, widget, state="normal"):
         self.mutable.append((widget, state))
@@ -181,8 +61,7 @@ class Controller:
             else:
                 forget_key(SETTINGS_DIR)
             self.settings["remember_key"] = self.remember_key.get()
-            allowed = {"url", "start_year", "end_year", "output", "network", "issn", "max_downloads", "remember_key"}
-            save_json(SETTINGS_DIR / "settings.json", {k: v for k, v in self.settings.items() if k in allowed})
+            save_json(SETTINGS_DIR / "settings.json", {k: v for k, v in self.settings.items() if k in SETTING_FIELDS})
         except (OSError, ValueError):
             self._log("Key 本机记忆未成功，当前仍可使用；请检查 Key 格式或本机文件权限。")
 
@@ -199,6 +78,8 @@ class Controller:
             except ValueError:
                 pass
         self.settings["network"] = "direct" if self.direct.get() else "system"
+        self.settings.update(output_mode=OUTPUT_MODES[self.output_mode.get()], title_filter=self.title_filter.get().strip(),
+                             filter_mode=FILTER_MODES[self.filter_mode.get()])
 
     def _browse(self):
         folder = filedialog.askdirectory(title="选择保存位置或已有 XML 文库", initialdir=self.output.get() if Path(self.output.get()).exists() else str(Path.home()))
@@ -222,6 +103,7 @@ class Controller:
             "url": cfg.url, "start_year": cfg.start_year, "end_year": cfg.end_year,
             "output": str(cfg.output), "network": cfg.network, "issn": cfg.issn,
             "max_downloads": cfg.max_downloads,
+            "output_mode": cfg.output_mode, "title_filter": cfg.title_filter, "filter_mode": cfg.filter_mode,
             "remember_key": self.remember_key.get(),
         }
         save_json(SETTINGS_DIR / "settings.json", self.settings)
@@ -253,7 +135,9 @@ class Controller:
             cfg = Config(api_key=self.key.get().strip(), url=self.url.get().strip(), start_year=start,
                          end_year=end, output=Path(self.output.get().strip()).expanduser().resolve(),
                          network="direct" if self.direct.get() else "system", issn=self.issn.get().strip().upper(),
-                         refresh=self.refresh_index.get(), retry_failed=self.retry_failed.get(), max_downloads=maximum)
+                         refresh=self.refresh_index.get(), retry_failed=self.retry_failed.get(), max_downloads=maximum,
+                         output_mode=OUTPUT_MODES[self.output_mode.get()], title_filter=self.title_filter.get().strip(),
+                         filter_mode=FILTER_MODES[self.filter_mode.get()])
             cfg.validate()
             if self.advanced_window and self.advanced_window.winfo_exists():
                 self.advanced_window.destroy()
@@ -267,7 +151,13 @@ class Controller:
         if getattr(self, "catalog_window", None) and self.catalog_window.winfo_exists():
             self.catalog_window.destroy()
         self.active_job = "xml"
-        self.saved_caption.set("已保存全文")
+        self.pipeline_pdf = cfg.output_mode != "xml"
+        self.saved_caption.set("完整输出" if self.pipeline_pdf else "已保存全文")
+        if self.pipeline_pdf:
+            self.pipeline_counts = {}
+            self.pdf_status.set("PDF · 下载后逐篇合成")
+            self.pdf_progress.configure(mode="determinate", progress_color="#087F8C")
+            self.pdf_progress.set(0)
         self.stages = ""
         self.control = Control()
         self._busy(True)
@@ -280,6 +170,7 @@ class Controller:
         self.status.set("正在准备")
         self.detail.set("正在识别期刊并建立论文列表…")
         self._log(f"开始任务：{start}–{end} 年。")
+        self._log(f"输出方式：{self.output_mode.get()}。" + ("每篇 PDF 校验完成后，再处理下一篇。" if self.pipeline_pdf else ""))
         self._log(f"本次最多成功下载 {maximum} 篇；已保存的完整文件不计入。" if maximum else "下载数量不限。")
         if end > datetime.now().year:
             self._log("所选范围包含未来年份，只能获取目前已登记、已发布且有权限的内容。")
@@ -304,6 +195,9 @@ class Controller:
             self.events.put({"kind": "done", "outcome": outcome, "text": text})
             if runner:
                 runner.key = ""
+                if runner.output_processor:
+                    runner.output_processor.exporter.key = ""
+                    runner.output_processor.exporter.cfg.api_key = ""
             cfg.api_key = ""
 
     def start_pdf(self, source, layout="double"):
@@ -324,7 +218,10 @@ class Controller:
             return
         if getattr(self, "pdf_window", None) and self.pdf_window.winfo_exists():
             self.pdf_window.destroy()
+        from library_inventory import normalize_root
+        self.output.set(str(normalize_root(cfg.source)))
         self.active_job = "pdf"
+        self.pipeline_pdf = False
         self._cancel_library_scan()
         if getattr(self, "catalog_window", None) and self.catalog_window.winfo_exists():
             self.catalog_window.destroy()
@@ -436,11 +333,19 @@ class Controller:
                 for name, variable in self.metrics.items():
                     variable.set(str(event[name]))
                 self.stages = event["stage"]
+                if event.get("title_filter"):
+                    self.local_hint.set(f"题名筛选：{event['total']}/{event['candidate_total']} 条 · {self.output_mode.get()}")
                 if self.active_job == "pdf":
                     self.pdf_progress.stop()
                     self.pdf_progress.configure(mode="determinate")
                     self.pdf_progress.set(event["saved"] / max(1, event["total"]))
                     self.pdf_status.set(f"PDF · 已完成 {event['saved']}/{event['total']} 篇")
+            elif kind == "pdf_counts":
+                self.pdf_progress.stop()
+                self.pdf_progress.configure(mode="determinate", progress_color="#087F8C")
+                self.pdf_progress.set(event["saved"] / max(1, event["total"]))
+                self.pdf_status.set(f"本次范围 · PDF {event['saved']}/{event['total']} 篇")
+                self.pipeline_counts = event
             elif kind == "done":
                 self.progress.stop()
                 self._busy(False)
@@ -486,6 +391,17 @@ class Controller:
                     else:
                         self.pdf_progress.configure(progress_color="#C58A30")
                         self.pdf_status.set("PDF · " + self.status.get())
+                elif getattr(self, "pipeline_pdf", False):
+                    counts = getattr(self, "pipeline_counts", {})
+                    saved, total = counts.get("saved", 0), counts.get("total", 0)
+                    if outcome == "complete" and saved == total and total:
+                        self.pdf_progress.configure(progress_color="#24976C")
+                        self.pdf_status.set(f"PDF 已生成完成 · {saved} 篇")
+                    elif outcome == "complete" and self.stages == "limit_reached":
+                        self.pdf_status.set(f"本次 PDF 已生成完成 · 新增 {self.downloaded_this_run} 篇")
+                    else:
+                        self.pdf_progress.configure(progress_color="#C58A30")
+                        self.pdf_status.set(f"PDF · 完成 {saved}/{total} 篇 · {self.status.get()}")
                 self.detail.set(text)
                 self._log(text)
                 if self.closing:

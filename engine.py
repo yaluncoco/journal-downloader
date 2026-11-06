@@ -28,7 +28,7 @@ import uuid
 from xml_utils import atomic_bytes, inspect_xml, plain_text, save_fulltext
 from library_store import state_dir, sidecar_path, existing_sidecar, migrate_library
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 AGENT = f"JournalXMLDownloader/{VERSION} (personal research)"
 FULLTEXT = {"fulltext_structured", "fulltext_rawtext"}
 NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)
@@ -117,6 +117,9 @@ class Config:
     interval: float = 3.0
     timeout: float = 30.0
     max_downloads: int = 0
+    output_mode: str = "xml"
+    title_filter: str = ""
+    filter_mode: str = "any"
 
     def validate(self):
         parse_journal_url(self.url)
@@ -132,6 +135,10 @@ class Config:
             raise ValueError("请选择保存文件夹。")
         if type(self.max_downloads) is not int or self.max_downloads < 0:
             raise ValueError("下载数量必须是非负整数，0 表示不限。")
+        if self.output_mode not in ("xml", "xml_pdf", "pdf"):
+            raise ValueError("输出方式无效。")
+        from article_filter import filter_records
+        filter_records([], self.title_filter, self.filter_mode)
 
 
 class Cancelled(Exception):
@@ -399,6 +406,9 @@ class Downloader:
         self.journal = None
         self.records = []
         self.saved = {}
+        self.xml_saved = {}
+        self.output_processor = None
+        self.candidate_total = 0
         self.failures = {}
         self.latest = {}
         self.new_count = 0
@@ -621,16 +631,22 @@ class Downloader:
                    "downloaded_this_run": self.new_count, "pending": len(pending),
                    "max_downloads": self.config.max_downloads, "download_target": self.download_target,
                    "failed_or_review": len(self.failures), "source": "Crossref candidate list; Elsevier XML"}
+        summary.update(output_mode=self.config.output_mode, candidate_total=self.candidate_total,
+                       excluded=max(0, self.candidate_total - len(self.records)),
+                       title_filter=self.config.title_filter, filter_mode=self.config.filter_mode)
         save_json(self.state / "download_summary.json", summary)
         save_lines(self.state / "pending.jsonl", pending)
         self.emit(kind="counts", **summary)
+        if self.output_processor:
+            self.emit(kind="pdf_counts", total=len(self.records), saved=len(self.saved),
+                      pending=len(pending), stage=stage)
 
     def run(self):
         self.journal = self.resolve()
         self.base = library_path(Path(self.config.output), self.journal)
         self.base.mkdir(parents=True, exist_ok=True)
         self.emit(kind="library", path=str(self.base), journal=self.journal.name, issn=self.journal.issn)
-        with library_lock(self.base, managed=True):
+        with library_lock(self.base, managed=True), ExitStack() as stack:
             migrate_library(self.base)
             save_json(self.state / "journal.json", {"name": self.journal.name, "issn": self.journal.issn, "url": self.journal.url})
             self.log(f"期刊：{self.journal.name} · ISSN {self.journal.issn}")
@@ -639,8 +655,19 @@ class Downloader:
             self.emit(kind="phase", text="正在读取保存位置中已有的 XML…")
             self.inventory = scan_existing(self.base, checkpoint=self.control.checkpoint)
             self.log(f"本地 XML 校验：{len(self.inventory['saved'])} 篇完整，{self.inventory['invalid']} 个文件未通过检查。")
-            self.records = self.collect()
-            save_lines(self.state / "manifest.jsonl", self.records)
+            candidates = self.collect()
+            self.candidate_total = len(candidates)
+            save_lines(self.state / "manifest.jsonl", candidates)
+            from article_filter import filter_records
+            self.records = filter_records(candidates, self.config.title_filter, self.config.filter_mode)
+            if self.config.title_filter.strip():
+                self.log(f"题名筛选：{len(candidates)} 条中匹配 {len(self.records)} 条，排除 {len(candidates) - len(self.records)} 条。关键词只匹配论文题名。")
+            if self.config.output_mode != "xml":
+                from download_output import DownloadOutput
+                self.output_processor = DownloadOutput(self.config, self.base, self.emit, self.control)
+                stack.enter_context(self.output_processor.session())
+                self.emit(kind="phase", text="正在校验已有 PDF…")
+                self.output_processor.scan()
             self.latest = latest_log(self.state / "download_log.jsonl")
             try:
                 self.download()
@@ -674,6 +701,12 @@ class Downloader:
             if not found:
                 found = verify_saved(self.base, row)
             if found:
+                self.xml_saved[row["doi"]] = found
+            if self.output_processor:
+                complete = self.output_processor.reusable(row, found)
+                if complete:
+                    self.saved[row["doi"]] = complete
+            elif found:
                 self.saved[row["doi"]] = found
         self.reused = len(self.saved)
         self.log(f"完整性校验结束：{self.reused} / {total} 已保存并通过检查。")
@@ -683,7 +716,7 @@ class Downloader:
             doi = row["doi"]
             if doi in self.saved:
                 continue
-            if not self.config.retry_failed and self.latest.get(doi, {}).get("status") in permanent:
+            if doi not in self.xml_saved and not self.config.retry_failed and self.latest.get(doi, {}).get("status") in permanent:
                 self.failures[doi] = self.latest[doi]
             else:
                 pending.append(row)
@@ -694,8 +727,7 @@ class Downloader:
             return
         pause = load_json(self.state / "server_pause.json", {})
         deadline = quota_deadline(pause.get("deadline"))
-        if deadline:
-            self.control.wait(deadline - time.time(), pause.get("reason", "等待服务器恢复"))
+        network_started = False
         pass_number = 0
         while pending:
             pass_number += 1
@@ -703,12 +735,18 @@ class Downloader:
             for index, row in enumerate(pending):
                 self.control.checkpoint()
                 doi = row["doi"]
-                self.emit(kind="phase", text=f"正在下载 · {doi}")
-                while True:
-                    data, info = self.fetch(doi)
-                    if not info.get("wait_until"):
-                        break
-                    self.server_wait(max(0, info["wait_until"] - time.time()), "服务器限流 / 配额等待")
+                existing = self.xml_saved.get(doi)
+                data, info = None, dict(existing or {})
+                if not existing:
+                    if not network_started and deadline:
+                        self.control.wait(max(0, deadline - time.time()), pause.get("reason", "等待服务器恢复"))
+                    network_started = True
+                    self.emit(kind="phase", text=f"正在下载 · {doi}")
+                    while True:
+                        data, info = self.fetch(doi)
+                        if not info.get("wait_until"):
+                            break
+                        self.server_wait(max(0, info["wait_until"] - time.time()), "服务器限流 / 配额等待")
                 result = {"doi": doi, "year": row["year"], "time": timestamp(), **info}
                 target, txt, review = paths_for(self.base, row)
                 if data is not None:
@@ -721,18 +759,24 @@ class Downloader:
                     elif result["status"] in FULLTEXT:
                         result["sha256"] = save_fulltext(target, txt, data, doi)
                         result["file"] = str(target.relative_to(self.base))
-                        self.saved[doi] = result.copy()
-                        self.failures.pop(doi, None)
-                        self.new_count += 1
+                        self.xml_saved[doi] = result.copy()
                     elif result["status"] != "api_error":
                         atomic_bytes(review, data)
                         result["file"] = str(review.relative_to(self.state))
+                if result["status"] in FULLTEXT:
+                    if self.output_processor:
+                        result.update(self.output_processor.process(row, result))
+                    if result["status"] in FULLTEXT or result["status"] == "pdf_saved":
+                        self.saved[doi] = result.copy()
+                        self.failures.pop(doi, None)
+                        self.new_count += 1
                 status = result["status"]
-                if status not in FULLTEXT:
+                if status not in FULLTEXT and status != "pdf_saved":
                     self.failures[doi] = result
                 append_log(self.state / "download_log.jsonl", self.scrub(result))
                 self.latest[doi] = result
                 label = "全文已保存" if status in FULLTEXT else {
+                    "pdf_saved": "PDF 已完成", "pdf_pending": "PDF 待处理，XML 已保留",
                     "no_fulltext": "仅返回元数据，未计为全文", "invalid_xml": "XML 不完整，留待检查",
                     "network_error": "网络故障，稍后自动重试", "server_error": "服务器故障，稍后自动重试",
                     "authentication_error": "需要处理权限", "http_error": "该条目无法下载",

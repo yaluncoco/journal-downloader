@@ -10,7 +10,29 @@ import unicodedata
 
 def normalize(text):
     text = unicodedata.normalize("NFKD", html.unescape(text).casefold().replace("&", " and "))
-    return " ".join(re.findall(r"[a-z0-9]+", text))
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return " ".join(re.findall(r"[^\W_]+", text))
+
+
+def tokens(text):
+    # Conservative equivalences for common journal-title plurals. Do not stem
+    # arbitrary words (e.g. analysis, physics) or conflate all substring matches.
+    plurals = {"computers": "computer", "systems": "system", "applications": "application",
+               "sciences": "science", "technologies": "technology", "forests": "forest"}
+    return tuple(plurals.get(word, word) for word in normalize(text).split())
+
+
+def title_rank(query, title):
+    if query == title:
+        return (0, 0)
+    if len(query) <= len(title) and title[:len(query)-1] == query[:-1] and title[len(query)-1].startswith(query[-1]):
+        return (1, len(title) - len(query))
+    for start in range(len(title) - len(query) + 1):
+        if title[start:start+len(query)] == query:
+            return (2, start)
+    if all(any(word.startswith(q) for word in title) for q in query):
+        return (3, len(title))
+    return None
 
 
 @lru_cache(maxsize=1)
@@ -24,26 +46,44 @@ def catalog():
 
 @lru_cache(maxsize=1)
 def search_index():
-    return tuple((item, normalize(" ".join([item["name"], *item.get("aliases", [])])), item["issn"].replace("-", "").casefold())
+    return tuple((item, tokens(item["name"]), tuple(tokens(a) for a in item.get("aliases", [])), item["issn"].replace("-", "").casefold())
                  for item in catalog()["journals"])
 
 
-def search(query="", scope="全部"):
+def search(query="", scope="全部", category="全部学科", zone="全部分区", top=False):
+    from journal_metadata import category_matches, reference_matches
     if query.strip().casefold() == "rse":
         query = "0034-4257"
-    words = normalize(query).split()
+    words = tokens(query)
     compact = "".join(words)
+    if query.strip() and not words:
+        return []
     result = []
-    for item, title, issn in search_index():
+    for item, title, aliases, issn in search_index():
         if scope == "在刊" and item["status"] != "Active":
             continue
         if scope == "历史刊名" and item["status"] in ("Active", "Forthcoming"):
             continue
-        if not words or all(word in title for word in words) or compact in issn:
-            rank = (0 if title == " ".join(words) or issn == compact else
-                    1 if title.startswith(" ".join(words)) else 2)
-            result.append((rank, item["status"] != "Active", title, item))
-    return [item[-1] for item in sorted(result, key=lambda entry: entry[:3])]
+        if not category_matches(item, category) or not reference_matches(item, zone, top):
+            continue
+        if not words:
+            rank = (0, 0, 0)
+        elif issn == compact:
+            rank = (-1, 0, 0)
+        else:
+            main = title_rank(words, title)
+            ranks = [(main[0], 0, main[1])] if main is not None else []
+            for alias in aliases:
+                match = title_rank(words, alias)
+                if match is not None:
+                    ranks.append((match[0], 1, match[1]))
+            if compact and compact[0].isdigit() and compact in issn:
+                ranks.append((2, 0, 0))
+            if not ranks:
+                continue
+            rank = min(ranks)
+        result.append((rank, item["status"] != "Active", normalize(item["name"]), item))
+    return [entry[-1] for entry in sorted(result, key=lambda entry: entry[:3])]
 
 
 @lru_cache(maxsize=1)

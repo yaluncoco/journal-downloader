@@ -229,8 +229,9 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         self.label(progress, "", textvariable=self.detail, font=self.small_font, color=MUTED,
             wraplength=244, justify="left").grid(row=6, column=0, sticky="w", padx=20, pady=(12, 18))
 
+        self._output_options(right)
         info = ctk.CTkFrame(right, fg_color=PALE, corner_radius=14)
-        info.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        info.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         self.label(info, "连接校园网或学校 VPN", font=self.bold_font, color=TEAL).pack(anchor="w", padx=18, pady=(15, 5))
         self.label(info, "默认直连 Elsevier，自动校验与续传。\n临时断网会放缓重试，无需手动守候。", font=self.small_font,
             color="#5F858A", justify="left").pack(anchor="w", padx=18, pady=(0, 16))
@@ -270,6 +271,28 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
             width=130, corner_radius=12, fg_color=TEAL, hover_color=TEAL_HOVER, text_color=WHITE,
             font=self.bold_font)
         self.start_button.grid(row=0, column=5, padx=(0, 24), pady=16)
+
+    def _output_options(self, parent):
+        from article_filter import OUTPUT_MODES, FILTER_MODES
+        card = self.card(parent)
+        card.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        card.grid_columnconfigure(0, weight=1)
+        self.label(card, "输出与筛选", font=self.bold_font).grid(row=0, column=0, sticky="w", padx=18, pady=(18, 12))
+        self.editable(ctk.CTkSegmentedButton(card, values=list(OUTPUT_MODES), variable=self.output_mode,
+            height=36, corner_radius=9, border_width=3, fg_color="#F0F4F7",
+            selected_color="#D3EEEE", selected_hover_color="#BFE4E5", unselected_color="#F0F4F7",
+            unselected_hover_color="#E0E9EF", text_color=INK, font=self.small_font,
+            dynamic_resizing=False)).grid(row=1, column=0, sticky="ew", padx=16)
+        self.label(card, "选择 PDF 后逐篇合成。仅 PDF 模式会在\n校验成功后移除该篇 XML，失败时保留。",
+            font=self.small_font, color=MUTED, justify="left", wraplength=252).grid(row=2, column=0, sticky="w", padx=18, pady=(7, 15))
+        self.label(card, "题名关键词（可留空）", font=self.small_font, color=INK).grid(row=3, column=0, sticky="w", padx=18, pady=(0, 6))
+        self.entry(card, self.title_filter, placeholder_text="如 forest, deep learning", width=240).grid(row=4, column=0, sticky="ew", padx=16)
+        self.editable(ctk.CTkOptionMenu(card, values=list(FILTER_MODES), variable=self.filter_mode,
+            height=30, width=122, corner_radius=8, fg_color="#ECF1F5", button_color="#E0E8EE",
+            button_hover_color="#D3EEEE", text_color=INK, font=self.small_font,
+            dropdown_font=self.small_font)).grid(row=5, column=0, sticky="w", padx=18, pady=(8, 6))
+        self.label(card, "逗号分隔词组，仅匹配题名；不检索正文\n或作者关键词。空白表示下载全部题名。",
+            font=self.small_font, color=MUTED, justify="left", wraplength=252).grid(row=6, column=0, sticky="w", padx=18, pady=(0, 17))
 
     def _pdf_dialog(self):
         if self.worker and self.worker.is_alive():

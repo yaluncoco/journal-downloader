@@ -33,6 +33,9 @@ class ControllerTests(unittest.TestCase):
             for callback in app.tk.call("after", "info"):
                 app.tk.call("after", "cancel", callback)
             app.destroy()
+            # Tcl-owned variable cycles must be finalized on the UI thread.
+            import gc
+            gc.collect()
         self.addCleanup(cleanup)
         return app
 
@@ -102,6 +105,80 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("0034-4257", [item["issn"] for item in app.catalog_matches])
         self.assertIn("0924-2716", [item["issn"] for item in app.catalog_matches])
         app.catalog_window.destroy()
+
+    def test_folder_pdf_status_reads_actual_files_and_clears_immediately(self):
+        from test_pipeline import sample_pdf, article
+        from engine import paths_for, save_fulltext, save_json
+        from library_store import sidecar_path
+        from pdf_export import RENDERER_VERSION
+        import hashlib
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = root / PRESETS[0].issn
+            row = {'doi': '10.1016/j.example.2024.folder', 'year': 2024, 'title': 'Forest study', 'date': '2024'}
+            cached_index(base, [row])
+            source, txt, _ = paths_for(base, row)
+            digest = save_fulltext(source, txt, article(row['doi']), row['doi'])
+            target = base / 'fulltext_pdf/2024/example.pdf'
+            target.parent.mkdir(parents=True)
+            payload = sample_pdf(row['doi'])
+            target.write_bytes(payload)
+            save_json(sidecar_path(target), {'doi': row['doi'], 'xml_sha256': digest, 'pages': 1,
+                'pdf_sha256': hashlib.sha256(payload).hexdigest(), 'layout': 'double', 'renderer': RENDERER_VERSION})
+            app = self.quiet_app()
+            app.scan_libraries = True
+            app._init_library_watch()
+            app.start_year.set('2024')
+            app.end_year.set('2024')
+            app.url.set(PRESETS[0].url)
+            app.title_filter.set('')
+            app.output_mode.set('XML + PDF')
+            def scan(folder):
+                app.output.set(str(folder))
+                self.assertEqual(app.pdf_progress.get(), 0)
+                self.assertIn('正在读取当前目录', app.pdf_status.get())
+                app.after_cancel(app.scan_after)
+                app._start_library_scan()
+                app.scan_worker.join(5)
+                self.assertFalse(app.scan_worker.is_alive())
+                app._poll()
+            scan(base)
+            self.assertIn('PDF 1/1', app.pdf_status.get())
+            self.assertEqual(app.pdf_progress.get(), 1)
+            self.assertEqual(app.metrics['saved'].get(), '1')
+            target.write_bytes(b'truncated')
+            scan(base)
+            self.assertEqual(app.pdf_progress.get(), 0)
+            self.assertIn('待修复', app.pdf_status.get())
+            self.assertEqual(app.metrics['saved'].get(), '0')
+            scan(root / 'empty')
+            self.assertIn('暂无 XML / PDF', app.pdf_status.get())
+            self.assertEqual(app.pdf_progress.get(), 0)
+            app._cancel_library_scan()
+
+    def test_pipeline_pdf_counts_do_not_replace_download_limit_progress(self):
+        app = self.quiet_app()
+        app.active_job = 'xml'
+        app.pipeline_pdf = True
+        app.events.put({'kind': 'counts', 'total': 100, 'saved': 10, 'reused': 9, 'pending': 90,
+                        'stage': 'limit_reached', 'max_downloads': 1, 'download_target': 1, 'downloaded_this_run': 1})
+        app.events.put({'kind': 'pdf_counts', 'total': 100, 'saved': 10, 'pending': 90, 'stage': 'limit_reached'})
+        app.events.put({'kind': 'done', 'outcome': 'complete', 'text': 'Done'})
+        app._poll()
+        self.assertEqual(app.progress.get(), 1)
+        self.assertEqual(app.pdf_progress.get(), .1)
+        self.assertEqual(app.metrics['saved'].get(), '10')
+        self.assertIn('新增 1 篇', app.pdf_status.get())
+
+    def test_new_options_persist_without_key(self):
+        app = self.quiet_app()
+        with tempfile.TemporaryDirectory() as temp, patch.object(controller, 'SETTINGS_DIR', Path(temp)):
+            cfg = Config('SYNTHETIC_PRIVATE', PRESETS[0].url, 2024, 2024, Path(temp),
+                         output_mode='pdf', title_filter='forest, deep learning', filter_mode='all')
+            app._save_settings(cfg)
+            saved = json.loads((Path(temp) / 'settings.json').read_text(encoding='utf-8'))
+            self.assertEqual((saved['output_mode'], saved['filter_mode'], saved['title_filter']), ('pdf', 'all', 'forest, deep learning'))
+            self.assertNotIn('SYNTHETIC_PRIVATE', str(saved))
 
     def test_key_persists_across_restart_and_opt_out_removes_it(self):
         from credential_store import load_key, key_file

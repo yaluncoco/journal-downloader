@@ -85,9 +85,9 @@ def scan_existing(base, start=1800, end=2100, checkpoint=lambda: None):
 
 def normalize_root(root):
     root = Path(root).expanduser()
-    if root.name == "fulltext_xml":
+    if root.name in ("fulltext_xml", "fulltext_pdf"):
         return root.parent
-    if root.parent.name == "fulltext_xml":
+    if root.parent.name in ("fulltext_xml", "fulltext_pdf"):
         return root.parent.parent
     return root
 
@@ -103,7 +103,7 @@ def identifies(base, issn, title):
                     return item["issn"] == issn
             except (OSError, ValueError, AttributeError):
                 pass
-    if base.name == issn and (base / "fulltext_xml").is_dir():
+    if base.name == issn and any((base / name).is_dir() for name in ("fulltext_xml", "fulltext_pdf")):
         return True
     root = base / "fulltext_xml" if (base / "fulltext_xml").is_dir() else base
     # XML identifies a moved library even when its local state is unavailable.
@@ -124,7 +124,7 @@ def detect_journal(root):
     import json
     from journal_catalog import lookup
     root = normalize_root(root)
-    if not (root / "fulltext_xml").is_dir() and not any(root.glob("*.xml")):
+    if not any((root / name).is_dir() for name in ("fulltext_xml", "fulltext_pdf")) and not any(root.glob("*.xml")):
         return None
     for directory in (state_dir(root), root):
         try:
@@ -156,7 +156,7 @@ def resolve_library(root, issn, title):
     root = normalize_root(root)
     if (root / issn).is_dir():
         return root / issn
-    if (root / "fulltext_xml").is_dir() or any(root.glob("*.xml")):
+    if any((root / name).is_dir() for name in ("fulltext_xml", "fulltext_pdf")) or any(root.glob("*.xml")):
         if identifies(root, issn, title):
             return root
     # Preserve legacy state-only library locations.

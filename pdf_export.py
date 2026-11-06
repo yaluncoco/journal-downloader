@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 import hashlib
 import io
 import os
@@ -133,11 +134,74 @@ class PdfExporter:
                   pending=total-saved, stage=stage)
 
     def run(self):
-        self.output.mkdir(parents=True, exist_ok=True)
         self.emit(kind="library", path=str(self.output))
+        with self.session():
+            return self._run()
+
+    @contextmanager
+    def session(self):
+        """One lock/cache session shared by batch and sequential exports."""
+        self.output.mkdir(parents=True, exist_ok=True)
         with library_lock(self.output, managed=True):
             migrate_pdf(self.output)
-            return self._run()
+            yield self
+
+    def target_for(self, source, year=None):
+        relative = source.relative_to(self.xml_root)
+        if relative.parts[0] == "fulltext_xml":
+            relative = Path(*relative.parts[1:])
+        if year and len(relative.parts) == 1:
+            relative = Path(str(year)) / relative
+        return self.output / relative.with_suffix(".pdf")
+
+    def export_one(self, source, year=None):
+        """Export exactly one XML. Caller owns session; failures preserve source."""
+        self.control.checkpoint()
+        target = self.target_for(source, year)
+        data = source.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        sidecar = existing_sidecar(source)
+        if sidecar.exists() and sidecar.read_text(encoding="ascii").strip().lower() != digest:
+            raise ValueError("XML 的 SHA-256 校验失败，请重新下载本篇 XML。")
+        article = Article(data)
+        if year is None and article.year.isdigit() and not self.cfg.start_year <= int(article.year) <= self.cfg.end_year:
+            return {"status": "outside_years"}
+        fingerprint = {"xml_sha256": digest, "layout": self.cfg.layout,
+                       "renderer": RENDERER_VERSION, "doi": article.doi}
+        meta_path = sidecar_path(target)
+        if self.reusable(target, existing_sidecar(target), fingerprint):
+            return {"status": "already_saved", "doi": article.doi, "pdf": str(target), "xml_sha256": digest}
+        if self.browser is None:
+            self.browser = find_browser()
+        self.emit(kind="phase", text=f"正在准备 PDF 图片 · {article.title}")
+        cache = ImageCache(self.cache / digest[:24], self.key, self.cfg.network, self.control, self.emit)
+        objects = image_objects(article.root)
+        images, image_meta = {}, []
+        try:
+            for ref in article.required_images():
+                self.control.checkpoint()
+                path, info = cache.get(ref, objects.get(ref, []))
+                images[ref] = path
+                image_meta.append(info)
+                if info["quality"] != "IMAGE-HIGH-RES":
+                    self.emit(kind="log", text=f"{article.doi} · {ref} 高清不可用，已采用普通图。")
+        finally:
+            cache.key = ""
+        document = article.render(images, self.cfg.layout)
+        self.emit(kind="phase", text=f"正在排版与校验 PDF · {article.doi}")
+        temp_base = self.state / "work"
+        temp_base.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="pdf-", dir=temp_base, ignore_cleanup_errors=True) as tmp:
+            pdf = render_pdf(document, self.browser, Path(tmp), self.control)
+            pages = validate_pdf(pdf, article.doi)
+        self.control.checkpoint()
+        atomic_bytes(target, pdf)
+        save_json(meta_path, {**fingerprint, "pdf_sha256": hashlib.sha256(pdf).hexdigest(),
+                             "pages": pages, "images": image_meta, "created_at": timestamp(),
+                             "year": year or (int(article.year) if article.year.isdigit() else None),
+                             "title": article.title})
+        return {"status": "pdf_saved", "doi": article.doi, "pdf": str(target),
+                "xml_sha256": digest, "pages": pages, "figures": len(images)}
 
     def _run(self):
         self.emit(kind="phase", text="正在扫描已下载 XML…")
@@ -159,59 +223,17 @@ class PdfExporter:
         for index, (source, year) in enumerate(records, 1):
             self.control.checkpoint()
             relative = source.relative_to(self.xml_root)
-            target = self.output / relative.with_suffix(".pdf")
-            if year and len(relative.parts) == 1:
-                target = self.output / str(year) / relative.with_suffix(".pdf")
             identity = str(relative)
             record = {"xml": identity, "checked_at": timestamp()}
             try:
-                data = source.read_bytes()
-                digest = hashlib.sha256(data).hexdigest()
-                sidecar = existing_sidecar(source)
-                if sidecar.exists() and sidecar.read_text(encoding="ascii").strip().lower() != digest:
-                    raise ValueError("XML 的 SHA-256 校验失败，请重新下载本篇 XML。")
-                article = Article(data)
-                if year is None and article.year.isdigit() and not self.cfg.start_year <= int(article.year) <= self.cfg.end_year:
+                record.update(self.export_one(source, year))
+                if record["status"] == "outside_years":
                     total -= 1
                     continue
-                record["doi"] = article.doi
-                meta_path = sidecar_path(target)
-                fingerprint = {"xml_sha256": digest, "layout": self.cfg.layout,
-                               "renderer": RENDERER_VERSION, "doi": article.doi}
-                if self.reusable(target, meta_path, fingerprint):
-                    saved += 1
+                saved += 1
+                if record["status"] == "already_saved":
                     reused += 1
-                    record["status"] = "already_saved"
-                else:
-                    if self.browser is None:
-                        self.browser = find_browser()
-                    self.emit(kind="phase", text=f"{index}/{len(records)} · {article.title}")
-                    cache = ImageCache(self.cache / digest[:24], self.key, self.cfg.network, self.control, self.emit)
-                    objects = image_objects(article.root)
-                    images, image_meta = {}, []
-                    try:
-                        for ref in article.required_images():
-                            path, info = cache.get(ref, objects.get(ref, []))
-                            images[ref] = path
-                            image_meta.append(info)
-                            if info["quality"] != "IMAGE-HIGH-RES":
-                                self.emit(kind="log", text=f"{article.doi} · {ref} 高清不可用，已采用普通图。")
-                    finally:
-                        cache.key = ""
-                    document = article.render(images, self.cfg.layout)
-                    self.emit(kind="phase", text=f"正在排版与校验 PDF · {article.doi}")
-                    temp_base = self.state / "work"
-                    temp_base.mkdir(exist_ok=True)
-                    with tempfile.TemporaryDirectory(prefix="pdf-", dir=temp_base, ignore_cleanup_errors=True) as tmp:
-                        pdf = render_pdf(document, self.browser, Path(tmp), self.control)
-                        pages = validate_pdf(pdf, article.doi)
-                    self.control.checkpoint()
-                    atomic_bytes(target, pdf)
-                    save_json(meta_path, {**fingerprint, "pdf_sha256": hashlib.sha256(pdf).hexdigest(),
-                                         "pages": pages, "images": image_meta, "created_at": timestamp()})
-                    record.update(status="pdf_saved", pages=pages, figures=len(images))
-                    saved += 1
-                self.emit(kind="log", text=f"{index}/{len(records)} · {article.doi} · {'校验通过，跳过' if record['status'] == 'already_saved' else 'PDF 已合成'}")
+                self.emit(kind="log", text=f"{index}/{len(records)} · {record['doi']} · {'校验通过，跳过' if record['status'] == 'already_saved' else 'PDF 已合成'}")
             except (ActionRequired, Cancelled):
                 raise
             except Exception as error:

@@ -67,6 +67,15 @@ def _run(output, online=False, pdf=False):
         assert any(item["issn"] == "0034-4257" for item in search("remote sensing environment"))
         assert local_journal("https://www.sciencedirect.com/science/journal/01681923").issn == "0168-1923"
         results["bundled_journal_catalog"] = catalog()["count"]
+        from journal_metadata import details
+        match = search('computer and electronic')[0]
+        assert match['issn'] == '0168-1699'
+        assert details(match)['cas2025']['year'] == 2025
+        assert search('computer and', category='林学 × 计算机')[0]['issn'] == match['issn']
+        from article_filter import filter_records
+        assert len(filter_records([{'title': 'Forest study'}, {'title': 'Other'}], 'forest')) == 1
+        assert app.output_mode.get() in ('仅 XML', 'XML + PDF', '仅 PDF')
+        results['prefix_subject_reference_and_filters'] = True
         app.active_job = "pdf"
         app.events.put({"kind": "counts", "total": 2, "saved": 2, "reused": 1,
                         "pending": 0, "stage": "pdf_finished"})
@@ -163,6 +172,20 @@ def _run(output, online=False, pdf=False):
                 third = PdfExporter(pdf_cfg).run()
                 assert third["saved"] == 1 and third["reused"] == 0
                 results["pdf_render_resume_repair"] = True
+                pipeline_root = Path(tmp) / 'pipeline'
+                pipeline_base = pipeline_root / PRESETS[0].issn
+                cached_index(pipeline_base, [row])
+                pipeline_cfg = Config('OFFLINE_TEST_CREDENTIAL', PRESETS[0].url, 2024, 2024,
+                                      pipeline_root, interval=0, output_mode='pdf')
+                pipeline = Downloader(pipeline_cfg)
+                pipeline.fetch = lambda doi: (data, {'http': 200})
+                pipeline.run()
+                assert pipeline.new_count == 1 and not list(pipeline_base.rglob('*.xml'))
+                only_pdf = Downloader(pipeline_cfg)
+                only_pdf.fetch = no_request
+                only_pdf.run()
+                assert only_pdf.reused == 1 and only_pdf.new_count == 0
+                results['sequential_pdf_only_resume'] = True
             if online:
                 results["online_metadata"] = []
                 for journal in PRESETS:
