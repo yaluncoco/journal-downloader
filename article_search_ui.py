@@ -4,7 +4,7 @@ import webbrowser
 from tkinter import messagebox
 
 from article_filter import FILTER_MODES
-from article_search import SCOPES, SORTS, validate_search, website_url
+from article_search import SCOPES, SORTS, validate_search, website_url, scope_description
 from engine import local_journal
 
 
@@ -18,8 +18,9 @@ class ArticleSearchUI:
         local = SCOPES[self.search_scope.get()] == "local"
         if local and self.filter_mode.get() == "官网语法":
             self.filter_mode.set("任一词组")
-        self.search_hint.set(("只筛选 Crossref 题名 · " + self.filter_mode.get()) if local else
-                             self.filter_mode.get() + " · " + self.search_sort.get())
+        scope = SCOPES[self.search_scope.get()]
+        self.search_hint.set(scope_description(scope) + "\n" + self.filter_mode.get() +
+                             ("" if local else " · " + self.search_sort.get()))
         if getattr(self, "search_window", None) and self.search_window.winfo_exists():
             self.search_mode_menu.configure(values=[name for name in FILTER_MODES if not local or name != "官网语法"])
             self.search_sort_menu.configure(state="disabled" if local else "normal")
@@ -93,7 +94,11 @@ class ArticleSearchUI:
         title = f"{result['journal']} · {result['years'][0]}–{result['years'][1]}"
         wrap_to(self.label(win, title, font=self.bold_font, justify="left"), padding=40).grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 7))
         source = "本地候选题名" if result["scope"] == "local" or not result["query"].strip() else "ScienceDirect API"
-        hint = f"{source} · 命中 {result['candidate_total']} 条，可处理 {len(rows)} 条\n仅预览论文列表，尚未下载全文。回到主窗口可开始下载。"
+        hint = f"{source} · {scope_description(result['scope'])}\n命中 {result['candidate_total']} 条，可处理 {len(rows)} 条 · 关键词：{result['query'] or '无'}"
+        if result['scope'] != 'fulltext' and result['query'].strip():
+            hint += "\n当前只查题名。TLS 等术语可能出现在正文，可切换全文重新预览。"
+        else:
+            hint += "\n仅预览列表，尚未下载全文；缩写不会自动扩展为全称。"
         wrap_to(self.label(win, hint, font=self.small_font, color=MUTED, justify="left"), padding=40).grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 10))
         box = ctk.CTkTextbox(win, font=self.body_font, wrap="word", fg_color=WHITE, text_color=INK,
                              scrollbar_button_color="#D1DDE5", scrollbar_button_hover_color="#9BAEBE")
@@ -121,4 +126,9 @@ class ArticleSearchUI:
         following = self.secondary(bar, "下一页", lambda: show(1), width=85)
         following.grid(row=0, column=2)
         show()
+        if result['scope'] != 'fulltext' and result['query'].strip():
+            def fulltext():
+                self.search_scope.set(next(name for name, code in SCOPES.items() if code == 'fulltext'))
+                self.start(preview=True)
+            self.secondary(win, "改用全文重新预览", fulltext, width=175).grid(row=4, column=0, sticky="e", padx=20, pady=(0, 14))
         self.metrics["total"].set(str(len(rows)))

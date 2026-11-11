@@ -11,11 +11,12 @@ from engine import ActionRequired, Cancelled, Config, Control, Downloader, PRESE
 from credential_store import load_key, save_key, forget_key
 SETTINGS_DIR = Path(os.environ.get("LOCALAPPDATA",str(Path.home()))) / "JournalXMLDownloader"
 SETTING_FIELDS = {"url", "start_year", "end_year", "output", "network", "issn", "max_downloads",
-                  "remember_key", "output_mode", "title_filter", "filter_mode", "pdf_browser", "search_scope", "search_sort"}
+                  "remember_key", "output_mode", "title_filter", "filter_mode", "pdf_browser", "search_scope", "search_sort", "pdf_method"}
 
 from library_preview import LibraryPreview
 from article_filter import OUTPUT_MODES, FILTER_MODES
 from article_search import SCOPES, SORTS
+from pdf_official import METHODS
 
 
 class Controller(LibraryPreview):
@@ -52,6 +53,8 @@ class Controller(LibraryPreview):
         self.pdf_status = tk.StringVar(value="PDF · 尚未合成")
         self.pdf_browser = tk.StringVar(value=self.settings.get("pdf_browser", ""))
         self.pdf_browser_caption = tk.StringVar(value=self._browser_caption())
+        self.pdf_method = tk.StringVar(value=next((label for label, code in METHODS.items()
+            if code == self.settings.get('pdf_method')), next(iter(METHODS))))
 
     def _browser_caption(self):
         from browser_detection import browser_name
@@ -121,6 +124,7 @@ class Controller(LibraryPreview):
         self.settings.update(output_mode=OUTPUT_MODES[self.output_mode.get()], title_filter=self.title_filter.get().strip(),
                              filter_mode=FILTER_MODES[self.filter_mode.get()], pdf_browser=self.pdf_browser.get(),
                              search_scope=SCOPES[self.search_scope.get()], search_sort=SORTS[self.search_sort.get()])
+        self.settings['pdf_method'] = METHODS[self.pdf_method.get()]
 
     def _browse(self):
         folder = filedialog.askdirectory(title="选择保存位置或已有 XML 文库", initialdir=self.output.get() if Path(self.output.get()).exists() else str(Path.home()))
@@ -153,6 +157,7 @@ class Controller(LibraryPreview):
             "max_downloads": cfg.max_downloads,
             "output_mode": cfg.output_mode, "title_filter": cfg.title_filter, "filter_mode": cfg.filter_mode,
             "pdf_browser": cfg.pdf_browser,
+            "pdf_method": cfg.pdf_method,
             "search_scope": cfg.search_scope, "search_sort": cfg.search_sort,
             "remember_key": self.remember_key.get(),
         }
@@ -188,7 +193,8 @@ class Controller(LibraryPreview):
                          refresh=self.refresh_index.get(), retry_failed=self.retry_failed.get(), max_downloads=maximum,
                          output_mode=OUTPUT_MODES[self.output_mode.get()], title_filter=self.title_filter.get().strip(),
                          filter_mode=FILTER_MODES[self.filter_mode.get()], pdf_browser=self.pdf_browser.get(),
-                         search_scope=SCOPES[self.search_scope.get()], search_sort=SORTS[self.search_sort.get()])
+                         search_scope=SCOPES[self.search_scope.get()], search_sort=SORTS[self.search_sort.get()],
+                         pdf_method=METHODS[self.pdf_method.get()])
             cfg.validate()
             if self.advanced_window and self.advanced_window.winfo_exists():
                 self.advanced_window.destroy()
@@ -229,6 +235,8 @@ class Controller(LibraryPreview):
             self._log("只获取论文列表，不下载全文；相同条件可复用检索缓存。")
         else:
             self._log(f"输出方式：{self.output_mode.get()}。" + ("每篇 PDF 校验完成后，再处理下一篇。" if self.pipeline_pdf else ""))
+            if self.pipeline_pdf:
+                self._log("PDF 方式：" + self.pdf_method.get() + ("。不会自动启动浏览器。" if cfg.pdf_method != 'browser' else "。已选择浏览器排版。"))
             self._log(f"本次最多成功下载 {maximum} 篇；已保存的完整文件不计入。" if maximum else "下载数量不限。")
         if end > datetime.now().year:
             self._log("所选范围包含未来年份，只能获取目前已登记、已发布且有权限的内容。")
@@ -303,7 +311,7 @@ class Controller(LibraryPreview):
             cfg = PdfConfig(source=Path(source).expanduser().resolve(), api_key=self.key.get().strip(),
                             network="direct" if self.direct.get() else "system",
                             start_year=int(self.start_year.get()), end_year=int(self.end_year.get()),
-                            layout=layout, browser=self.pdf_browser.get())
+                            layout=layout, browser=self.pdf_browser.get(), method=METHODS[self.pdf_method.get()])
             cfg.validate()
             self._persist_api_key()
         except (ValueError, OSError) as error:
@@ -334,7 +342,7 @@ class Controller(LibraryPreview):
         self.percent.set("准备中")
         self.status.set("准备合成 PDF")
         self.detail.set("扫描现有 XML，校验 PDF 与图片缓存…")
-        self._log(f"开始合成 PDF：{cfg.start_year}–{cfg.end_year} 年，{'双栏' if layout == 'double' else '单栏'}排版。")
+        self._log(f"开始生成 PDF：{cfg.start_year}–{cfg.end_year} 年，{self.pdf_method.get()}。")
         self.worker = threading.Thread(target=self._pdf_work, args=(cfg, PdfExporter), daemon=False)
         self.worker.start()
 
@@ -481,7 +489,7 @@ class Controller(LibraryPreview):
                             text = "所选文件夹和年份范围内未找到 XML，请选择已有文库或 fulltext_xml 文件夹。"
                         else:
                             self.status.set("PDF 合成完成")
-                            text = "PDF 已保存并通过校验。点击「打开文件夹」查看；生成文件为 XML 重排阅读版。"
+                            text = "PDF 已保存并通过校验。自动方式优先保存官方原版，其余为 XML 阅读版；点击「打开文件夹」查看。"
                     elif self.stages == "limit_reached":
                         self.status.set("已达到本次数量")
                         text = f"本次成功下载 {self.downloaded_this_run} 篇。再次开始会跳过完整文件，继续下载剩余论文。"

@@ -6,6 +6,7 @@ import time
 from engine import Cancelled, Journal, library_path, local_journal, parse_journal_url, valid_issn, load_json
 from article_filter import filter_records, OUTPUT_MODES, FILTER_MODES
 from article_search import SCOPES, SORTS, validate_search, uses_api, search_spec, cached_search
+from pdf_official import METHODS
 
 
 class LibraryPreview:
@@ -18,7 +19,7 @@ class LibraryPreview:
         if not self.scan_libraries:
             return
         for variable in (self.output, self.url, self.start_year, self.end_year, self.issn,
-                         self.output_mode, self.title_filter, self.filter_mode, self.search_scope, self.search_sort):
+                         self.output_mode, self.title_filter, self.filter_mode, self.search_scope, self.search_sort, self.pdf_method):
             variable.trace_add("write", self._queue_library_scan)
         self._queue_library_scan()
 
@@ -76,6 +77,7 @@ class LibraryPreview:
             query, filter_mode = self.title_filter.get(), FILTER_MODES[self.filter_mode.get()]
             search_scope, search_sort = SCOPES[self.search_scope.get()], SORTS[self.search_sort.get()]
             output_mode = OUTPUT_MODES[self.output_mode.get()]
+            pdf_method = METHODS[self.pdf_method.get()]
             validate_search(query, filter_mode, search_scope, search_sort)
         except (OSError, ValueError) as error:
             self.local_hint.set(str(error))
@@ -92,6 +94,7 @@ class LibraryPreview:
             from library_store import state_dir
             from pdf_inventory import scan_pdfs
             from pdf_export import RENDERER_VERSION
+            from pdf_native import NATIVE_VERSION
             checked_before = preview_cache.checked
             last_notice = time.monotonic()
             def checkpoint():
@@ -116,8 +119,9 @@ class LibraryPreview:
                 xml_dois, pdf_dois = set(inventory["saved"]), set(pdfs["saved"])
                 compatible = {doi for doi in pdf_dois if doi not in xml_dois or
                     pdfs["saved"][doi].get("xml_sha256") == inventory["saved"][doi]["sha256"]}
-                desired_pdfs = {doi for doi in compatible if pdfs["saved"][doi].get("layout") == "double"
-                                and pdfs["saved"][doi].get("renderer") == RENDERER_VERSION}
+                desired_pdfs = compatible if pdf_method == 'auto' else {doi for doi in compatible
+                    if pdfs['saved'][doi].get('layout') == ('double' if pdf_method == 'browser' else 'single')
+                    and pdfs['saved'][doi].get('renderer') == (RENDERER_VERSION if pdf_method == 'browser' else NATIVE_VERSION)}
                 complete = xml_dois if output_mode == "xml" else desired_pdfs if output_mode == "pdf" else xml_dois & desired_pdfs
                 total = None
                 listed_saved = 0

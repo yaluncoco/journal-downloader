@@ -37,6 +37,9 @@ StringStruct('ProductName', 'Journal Downloader'), StringStruct('OriginalFilenam
         "--collect-all", "customtkinter", "--name", "JournalDownloader", "--distpath", str(output),
         "--workpath", str(work), "--specpath", str(work), "--icon", str(ROOT / "app.ico"),
         "--version-file", str(resource)]
+    for package in ('reportlab', 'ziamath', 'ziafont', 'latex2mathml', 'cairo', 'freetype'):
+        command += ['--collect-all', package]
+    command += ['--hidden-import', 'rlPyCairo']
     for name in ("app.ico", "app.png", "journals.json", "journal_metadata.json", "DATA_SOURCES.md"):
         command += ["--add-data", str(ROOT / name) + ";."]
     command += ["--add-data", str(ROOT / "data-licenses") + ";data-licenses", str(ROOT / "app.py")]
@@ -45,10 +48,12 @@ StringStruct('ProductName', 'Journal Downloader'), StringStruct('OriginalFilenam
     for name in ("README.md", "使用说明.md", "INSTALLATION.txt", "DATA_SOURCES.md", "IEEE接口说明.md"):
         shutil.copy2(ROOT / name, application / name)
     shutil.copytree(ROOT / "data-licenses", application / "data-licenses", dirs_exist_ok=True)
-    for package in ("customtkinter", "pillow", "pypdf", "pyinstaller", "darkdetect", "packaging"):
+    for package in ("customtkinter", "pillow", "pypdf", "pyinstaller", "darkdetect", "packaging",
+                    'reportlab', 'ziamath', 'ziafont', 'svglib', 'lxml', 'rlPyCairo', 'pycairo',
+                    'freetype-py', 'cssselect2', 'tinycss2', 'webencodings', 'latex2mathml', 'charset-normalizer'):
         distribution = importlib.metadata.distribution(package)
         for file in distribution.files or []:
-            if "license" in file.name.lower() or "copying" in file.name.lower():
+            if any(word in file.name.lower() for word in ('license', 'copying', 'ofl', 'notice')):
                 target = application / "third-party-licenses" / package / file.name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(distribution.locate_file(file), target)

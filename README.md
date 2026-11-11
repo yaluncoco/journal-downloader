@@ -4,6 +4,8 @@
 
 常用入口保留 **Remote Sensing of Environment（RSE）** 与 **ISPRS Journal of Photogrammetry and Remote Sensing**。点击「检索全部期刊」可按英文名称、关键词或 ISSN 搜索内置目录，也支持粘贴期刊地址。
 
+**v1.8.0** 排查 TLS 漏检与浏览器依赖：2026-11-11 实测 RSE、2020–2027 年、TLS，官网与 API 均为题名 1 篇、全文 113 篇。预览现在明确显示检索范围，题名模式可一键改为全文重新预览；官网入口使用未加引号的刊名和 ISSN 精确限定。默认 PDF 流程先校验官方原版，不可用时通过内置 ReportLab / MathML 排版生成单栏阅读版，不启动浏览器。只有手动选择浏览器排版才调用 Edge / Chrome。官方 PDF 必须与 XML 中的全文页数一致；HTTP 200 的第一页预览不会当作完整全文。
+
 **v1.7.0** 接入 ScienceDirect Search V2：论文关键词可检索全部内容（不含参考文献）或仅题名，支持大写 AND / OR / NOT、双引号词组、括号组合及相关度 / 最新发表排序。提供分页预览和官网核对入口；相同条件复用缓存，查询变更不会覆盖完整文库索引。旧版已保存的题名筛选仍按原方式执行，可手动切换到 API 检索。
 
 **v1.6.5** 修复浏览器启动进程返回 0 后，PDF 尚未写好就判定失败并清理临时目录的时序问题。现在会等待延迟输出及文件稳定，再校验 PDF 内容；无输出仍在限定时间后停止。诊断增加启动时序、运行权限、浏览器文件日志和相关已配置策略，检测到 `UserDataDir` 策略覆盖独立目录时停止该浏览器候选，避免使用已有浏览器会话。
@@ -27,9 +29,9 @@ v1.5.0 新增逐篇 XML→PDF、仅 PDF 输出、下载前题名词组筛选、�
 1. 连接校园网或学校 VPN。
 2. 输入自己的 API Key，选择预置期刊或粘贴期刊网址。
 3. 选择起止年份、保存位置、本次数量（0 表示不限）和输出方式：仅 XML / XML + PDF / 仅 PDF。需要筛选时填写论文关键词，选择检索范围，先点「预览」核对题名再开始下载。
-4. 已有 XML 时，点击「合成 PDF」，选择文库文件夹和双栏 / 单栏版式，开始合成。
+4. 已有 XML 时，点击「合成 PDF」，选择文库文件夹和 PDF 方式，开始生成。
 
-仅 XML 下载不需要浏览器；PDF 合成需要电脑已安装 Microsoft Edge 或 Google Chrome，二者任一个即可。程序自动优先检测 Edge，使用独立的后台进程，不需要把 Edge 设为默认浏览器或提前打开浏览器窗口。安装位置未被识别时，在「合成 PDF」或「高级设置」中点击「选择程序…」，选择 Edge 的 `msedge.exe`，再运行「检测 PDF 环境」。手动选择只使用指定的浏览器，点击「自动检测」可恢复自动回退。
+XML 下载及默认 PDF 方式均不需要浏览器。自动方式优先保存通过全文校验的官方 PDF，否则通过内置引擎生成带图的单栏阅读版。只有在「合成 PDF」中明确选择「浏览器排版」时才需要 Edge 或 Chrome；该方式自动优先检测 Edge，也可手动选择 `msedge.exe` 或 `chrome.exe` 并运行「检测浏览器环境」。
 
 右上角向上箭头用于软件更新。启动后在后台检查一次正式版本，有新版显示红点。点击「下载并安装」后下载并验证 SHA-256，再关闭当前窗口、打开安装向导；完成安装后可启动新版。安装日志保存在 `%LOCALAPPDATA%\JournalXMLDownloader\updates\版本号\setup.log`。临时网络失败最多重试两次，下载校验失败不会执行安装。
 
@@ -68,9 +70,9 @@ https://www.sciencedirect.com/search?pub=Remote+Sensing+of+Environment&date=2024
 - 同一期刊按年份归档，多个期刊按 ISSN 分开保存。
 - 独立的 PDF 合成入口：读取现有结构化 XML，补齐高清图片，保留图题、表格、MathML 公式及参考文献。
 - 左下角固定显示 PDF 进度，全部成功后显示绿色「PDF 已生成完成」；部分失败、未找到 XML 和停止状态分别提示。
-- 期刊双栏 / 舒适单栏排版，宽图表跨栏、长表格跨页、较长公式自动调整宽度。
+- 内置排版为单栏阅读版；可手动选择浏览器双栏 / 单栏排版。内置字体、MathML 公式绘制和图片处理随安装包分发；遇到不支持的公式、字体或过宽表格时保留 XML 并提示，不静默丢弃内容。
 - 彩色数字、文字等行内图片按文字字号排版，仍使用高清图片；表头与首行保持在一起，末尾比较行尽量同页。
-- 图片缓存解码与 SHA-256 校验；PDF 按 XML 哈希、版式、排版版本、文件哈希与可读取性校验后跳过。
+- 图片缓存解码与 SHA-256 校验；PDF 校验 XML 哈希、文件哈希、DOI、全部页流及页数。自动模式可复用既有完整阅读版；手动选择排版方式时同时核对版式与排版版本。
 - 单篇缺图、XML 损坏或不支持的内容记录待处理，继续其他论文；再次合成可重试。
 - 向上箭头更新入口、新版红点提示、安装包 SHA-256 校验、网络重试与安装日志；新版启动后才确认更新完成。
 - 适配屏幕工作区和 100%–200% DPI 缩放：宽屏双栏、窄屏上下排列，底部操作保持可见，长刊名自动换行。
@@ -102,26 +104,26 @@ python -m venv .build-env
 .\build.ps1 -ISCC "C:\Program Files\Inno Setup 7\ISCC.exe"
 ```
 
-安装器编译需安装官方 Inno Setup 7。产物为 `release/v1.7.0/JournalDownloader-Setup.exe`；应用目录为 `release/v1.7.0/JournalDownloader/`。XML 下载引擎使用 Python 标准库；界面使用 CustomTkinter，图片校验使用 Pillow，PDF 校验使用 pypdf，使用 PyInstaller 打包。浏览器不随程序分发。
+安装器编译需安装官方 Inno Setup 7。产物为 `release/v1.8.0/JournalDownloader-Setup.exe`；应用目录为 `release/v1.8.0/JournalDownloader/`。XML 下载引擎使用 Python 标准库；界面使用 CustomTkinter，图片校验使用 Pillow，PDF 校验使用 pypdf，使用 PyInstaller 打包。内置排版的依赖及字体随安装包分发；可选的浏览器不随程序分发。
 
 打包后离线自检：
 
 ```powershell
-.\release\v1.7.0\JournalDownloader\JournalDownloader.exe --self-test "$env:TEMP\journal-downloader-test.json"
+.\release\v1.8.0\JournalDownloader\JournalDownloader.exe --self-test "$env:TEMP\journal-downloader-test.json"
 ```
 
 加入 `--online` 可额外验证两个期刊的在线元数据查询，不需要真实 API Key。
-加入 `--pdf` 可额外验证 PDF 生成、完整文件跳过及损坏 PDF 重建，需要已安装 Edge/Chrome。
+加入 `--pdf` 可额外验证内置 PDF、Unicode 字符、MathML 公式、表格、完整文件跳过及损坏 PDF 重建，并检查未启动子进程；不需要安装浏览器。
 
 无网络批量合成（要求图片已缓存；API Key 不通过命令行传递）：
 
 ```powershell
-.\release\v1.7.0\JournalDownloader\JournalDownloader.exe --pdf-export "D:\文库\fulltext_xml" "D:\文库\fulltext_pdf"
+.\release\v1.8.0\JournalDownloader\JournalDownloader.exe --pdf-export "D:\文库\fulltext_xml" "D:\文库\fulltext_pdf"
 ```
 
-结果保存在本机应用数据中的 `offline_export_result.json`，输出目录只放 PDF；可加 `--single-column` 改为单栏。首次获取图片请使用界面输入 Key。
+结果保存在本机应用数据中的 `offline_export_result.json`，输出目录只放 PDF；默认使用内置单栏排版。首次获取图片请使用界面输入 Key。
 
-PDF 检测或离线合成可追加 `--pdf-browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"`，只测试和调用这一浏览器；路径应替换成目标电脑的实际位置。命令行未指定时自动检测，不读取界面的已保存浏览器设置。
+需要浏览器排版时，离线合成可追加 `--browser-render` 自动检测 Edge / Chrome，或 `--pdf-browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"` 只调用指定浏览器；路径应替换成目标电脑的实际位置。浏览器模式可加 `--single-column` 选择单栏，命令行不读取界面的已保存浏览器设置。
 
 ## 代码结构
 
@@ -145,7 +147,8 @@ PDF 检测或离线合成可追加 `--pdf-browser "C:\Program Files (x86)\Micros
 | `build_catalog.py` | 从官方 XLSX 清单构建目录快照 |
 | `pdf_assets.py` | 图片对象获取、重试与缓存校验 |
 | `pdf_document.py` | XML、CALS 表格、MathML 到安全排版 HTML |
-| `pdf_export.py` | PDF 批量合成、后台浏览器和断点校验 |
+| `pdf_export.py` | PDF 批量生成、排版选择和断点校验 |
+| `pdf_native.py` / `pdf_official.py` | 内置单栏阅读版与官方全文 PDF 校验 |
 | `browser_detection.py`、`browser_environment.py`、`pdf_browser.py` | Edge/Chrome 识别与手动路径、独立打印、启动状态与离线诊断 |
 | `updater.py`、`update_ui.py` | 检查版本、校验安装包、独立进程启动安装向导及完成记录 |
 | `test_engine.py`、`test_controller.py`、`test_pdf.py`、`test_updater.py`、`test_storage.py` | 引擎、界面、PDF、更新、数据迁移和 Key 加密测试 |
@@ -162,3 +165,16 @@ PDF 检测或离线合成可追加 `--pdf-browser "C:\Program Files (x86)\Micros
 EXE、窗口和界面使用用户指定的 [Alpine 图标](https://iconic-api.onrender.com/dark/alpine)。`app.svg` 保留原始矢量图，`app.png` 用于界面，`app.ico` 包含 16–256 像素的多种尺寸，供 Windows 使用。
 
 修改图标时，先将 SVG 渲染为至少 256 × 256 的透明 PNG，再运行 `python make_icon.py` 生成 ICO。仓库已包含这些文件，正常打包无需额外安装 SVG 渲染工具。
+
+### PDF 与校园网权限
+
+检索与 XML 下载通过官方 API 完成，不读取浏览器 Cookie。校园网 / VPN 出口必须由 Elsevier 识别，网页登录的会话权限不会自动成为 API 权限。API Key、机构授权、代理出口和配额仍决定可下载内容。
+
+在「合成 PDF」里选择方式（也用于下载时生成）：
+- **自动：官方优先 / 内置单栏**：默认；先获取 XML 作为正文与页数依据，再请求 `view=FULL` 的官方表示（请求头 `Accept: application/pdf`）。校验 DOI、文件结构及 `xocs:web-pdf-page-count`，完整时保存原版，不完整或未授权时用 XML 和图片生成阅读版。同一次会话遇到订阅 PDF 预览后不反复请求后续订阅 PDF，开放获取内容仍可尝试。
+- **内置单栏**：跳过官方 PDF 探测，直接用 XML 和图片排版，不启动浏览器。正文、表格为可检索文本，公式以高清图像嵌入。
+- **浏览器排版**：明确选择后才检测并调用 Edge / Chrome，可选择双栏或单栏。
+
+官方原版和 XML 阅读版是两种不同产物，阅读版的分页与期刊版式不相同。仅 PDF 模式仍会暂存 XML，只有最终 PDF 通过校验且校验记录写入成功后才删除该篇 XML。任何失败保留源文件。
+
+接口依据：[Article Retrieval](https://dev.elsevier.com/documentation/ArticleRetrievalAPI.wadl)、[API authentication](https://dev.elsevier.com/tecdoc_api_authentication.html)。本机订阅样本 XML 记录 17 页，官方 PDF 却仅返回 1 页，因此不能用 HTTP 200 或 `%PDF` 文件头代替全文校验。

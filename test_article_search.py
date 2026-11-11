@@ -73,6 +73,21 @@ class ArticleSearchTests(unittest.TestCase):
         self.assertEqual(query['title'], [spec['body']['title']])
         self.assertEqual(query['date'], ['2024-2026'])
         self.assertEqual(query['sortBy'], ['date'])
+        self.assertEqual(query['pub'], [PRESETS[0].name])
+        self.assertEqual(query['docId'], [PRESETS[0].issn])
+
+    def test_tls_title_and_fulltext_queries_stay_separate_and_fulltext_has_no_title_filter(self):
+        title = search_spec(PRESETS[0], 2020, 2027, 'TLS', 'any', 'title', 'relevance')
+        full = search_spec(PRESETS[0], 2020, 2027, 'TLS', 'any', 'fulltext', 'relevance')
+        self.assertEqual(title['body']['title'], '"tls"')
+        self.assertEqual(full['body']['qs'], '"tls"')
+        self.assertNotIn('title', full['body'])
+        self.assertNotEqual(cache_path(self.root, title), cache_path(self.root, full))
+        self.runner.config.title_filter = 'TLS'
+        self.runner.config.filter_mode = 'any'
+        self.runner.opener = Opener([response([entry(title='Laser scanning of forests')])])
+        self.runner.select_records()
+        self.assertEqual(len(self.runner.records), 1)
 
     def test_pagination_preserves_relevance_order_and_throttles(self):
         items = [entry(i) for i in range(103, 0, -1)]

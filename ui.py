@@ -349,15 +349,15 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI, ArticleSearchUI):
     def _output_options(self, parent):
         from article_filter import OUTPUT_MODES, FILTER_MODES
         card = self.card(parent)
-        card.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        card.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         card.grid_columnconfigure(0, weight=1)
-        self.label(card, "输出与筛选", font=self.bold_font).grid(row=0, column=0, sticky="w", padx=18, pady=(12, 6))
+        self.label(card, "输出与筛选", font=self.bold_font).grid(row=0, column=0, sticky="w", padx=18, pady=(8, 6))
         self.editable(ctk.CTkSegmentedButton(card, values=list(OUTPUT_MODES), variable=self.output_mode,
             height=32, corner_radius=9, border_width=3, fg_color="#F0F4F7",
             selected_color="#D3EEEE", selected_hover_color="#BFE4E5", unselected_color="#F0F4F7",
             unselected_hover_color="#E0E9EF", text_color=INK, font=self.small_font,
             dynamic_resizing=False)).grid(row=1, column=0, sticky="ew", padx=16)
-        self.label(card, "合成 PDF 支持 Edge / Chrome；下载 XML\n无需浏览器。仅 PDF 校验成功后移除 XML。",
+        self.label(card, "PDF 默认官方优先，未授权时内置单栏合成。\n无需浏览器；校验完成后才移除 XML。",
             font=self.small_font, color=MUTED, justify="left", wraplength=252).grid(row=2, column=0, sticky="w", padx=18, pady=(5, 6))
         from article_search import SCOPES
         self.label(card, "论文关键词（留空获取全部）", font=self.small_font, color=INK).grid(row=3, column=0, sticky="w", padx=18, pady=(0, 6))
@@ -388,13 +388,13 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI, ArticleSearchUI):
         from tkinter import filedialog, StringVar
         win = ctk.CTkToplevel(self, fg_color=BG)
         self.pdf_window = win
-        win.title("合成阅读版 PDF")
+        win.title("生成 PDF")
         win.transient(self)
         fit_window(win, (610, 580))
         win.grid_columnconfigure(0, weight=1)
         body = scroll_body(win)
         wrap_to(self.label(body, "把 XML 变成可阅读的论文", font=ctk.CTkFont(FONT, 22, weight="bold")), padding=12).grid(row=0, column=0, sticky="w", padx=6, pady=(12, 7))
-        wrap_to(self.label(body, "补齐高清图片，保留正文、公式、表格与参考文献。", font=self.small_font, color=MUTED), padding=12).grid(row=1, column=0, sticky="w", padx=6)
+        wrap_to(self.label(body, "官方原版优先；内置阅读版保留正文、图片、公式与表格。", font=self.small_font, color=MUTED), padding=12).grid(row=1, column=0, sticky="w", padx=6)
         card = self.card(body)
         card.grid(row=2, column=0, sticky="ew", padx=4, pady=20)
         card.grid_columnconfigure(0, weight=1)
@@ -416,18 +416,32 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI, ArticleSearchUI):
                 folder_var.set(value)
         self.secondary(folder_row, "选择", browse, width=65).grid(row=0, column=1)
         self.label(card, f"年份沿用主界面：{self.start_year.get()} — {self.end_year.get()}", font=self.small_font, color=MUTED).grid(row=2, column=0, sticky="w", padx=20, pady=(7, 17))
-        ctk.CTkSegmentedButton(card, values=["期刊双栏", "舒适单栏"], variable=layout_var,
+        from pdf_official import METHODS
+        ctk.CTkOptionMenu(card, values=list(METHODS), variable=self.pdf_method, height=36,
+            font=self.body_font, dropdown_font=self.body_font, fg_color="#ECF1F5",
+            button_color="#DDE8EE", text_color=INK).grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 15))
+        layout_control = ctk.CTkSegmentedButton(card, values=["期刊双栏", "舒适单栏"], variable=layout_var,
             height=40, corner_radius=10, border_width=4, fg_color="#F0F4F7",
             selected_color="#D3EEEE", selected_hover_color="#BFE4E5", unselected_color="#F0F4F7",
-            unselected_hover_color="#E0E9EF", text_color=INK, font=self.body_font).grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 20))
-        self._browser_controls(card, win).grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 18))
-        wrap_to(self.label(body, "使用主界面的 API Key 与网络设置；完整 PDF 会校验后跳过。\n输出到文库的 fulltext_pdf 文件夹。需要已安装 Edge 或 Chrome。\n生成的是 XML 重排阅读版，分页和细节可能与官方 PDF 不同。", font=self.small_font,
+            unselected_hover_color="#E0E9EF", text_color=INK, font=self.body_font)
+        layout_control.grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 15))
+        browser_controls = self._browser_controls(card, win)
+        browser_controls.grid(row=5, column=0, sticky="ew", padx=20, pady=(0, 18))
+        wrap_to(self.label(body, "方式同时用于下载时生成 PDF。默认不启动浏览器。\n官方 PDF 按 XML 记录的全文页数校验，第一页预览不会算完成。\n内置排版为单栏阅读版；浏览器排版可选择双栏。\n校园网 / VPN 出口须获 API 授权，网页登录会话不会自动传给 API。", font=self.small_font,
                    color=MUTED, justify="left"), padding=12).grid(row=3, column=0, sticky="w", padx=6)
         actions = ctk.CTkFrame(win, fg_color="transparent")
         actions.grid(row=1, column=0, sticky="ew", padx=28, pady=(4, 16))
         actions.grid_columnconfigure(1, weight=1)
-        self.secondary(actions, "检测 PDF 环境", self.check_pdf_environment, width=130).grid(row=0, column=0)
-        ctk.CTkButton(actions, text="开始合成", height=44, width=140, corner_radius=12,
+        diagnostic = self.secondary(actions, "检测浏览器环境", self.check_pdf_environment, width=130)
+        diagnostic.grid(row=0, column=0)
+        def method_changed(*_):
+            show = METHODS[self.pdf_method.get()] == 'browser'
+            for widget in (layout_control, browser_controls, diagnostic):
+                widget.grid() if show else widget.grid_remove()
+        trace = self.pdf_method.trace_add('write', method_changed)
+        win.bind('<Destroy>', lambda event: self.pdf_method.trace_remove('write', trace) if event.widget == win else None, add='+')
+        method_changed()
+        ctk.CTkButton(actions, text="开始生成", height=44, width=140, corner_radius=12,
             fg_color=TEAL, hover_color=TEAL_HOVER, font=self.bold_font,
             command=lambda: self.start_pdf(folder_var.get(), "double" if layout_var.get() == "期刊双栏" else "single")).grid(row=0, column=1, sticky="e")
 

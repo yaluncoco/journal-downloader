@@ -4,6 +4,7 @@ from pathlib import Path
 
 from engine import Cancelled, ActionRequired, append_log, timestamp
 from pdf_export import PdfConfig, PdfExporter, RENDERER_VERSION
+from pdf_native import NATIVE_VERSION
 from pdf_inventory import read_pdf, scan_pdfs
 
 
@@ -11,7 +12,7 @@ class DownloadOutput:
     def __init__(self, cfg, base, emit, control):
         self.cfg, self.base, self.emit, self.control = cfg, base.resolve(), emit, control
         self.exporter = PdfExporter(PdfConfig(base, cfg.api_key, cfg.network, cfg.start_year, cfg.end_year,
-                                             browser=cfg.pdf_browser), emit, control)
+                                             browser=cfg.pdf_browser, method=cfg.pdf_method), emit, control)
         # Also accept renamed legacy XML directly inside the selected library.
         self.exporter.xml_root = self.base
         self.pdfs = {}
@@ -23,8 +24,11 @@ class DownloadOutput:
         self.pdfs = scan_pdfs(self.base, self.cfg.start_year, self.cfg.end_year, self.control.checkpoint)["saved"]
 
     def expected(self, doi, xml=None):
-        return {"doi": doi, "layout": "double", "renderer": RENDERER_VERSION,
-                **({"xml_sha256": xml["sha256"]} if xml else {})}
+        result = {"doi": doi, **({"xml_sha256": xml["sha256"]} if xml else {})}
+        if self.cfg.pdf_method != 'auto':
+            result.update(layout='double' if self.cfg.pdf_method == 'browser' else 'single',
+                          renderer=RENDERER_VERSION if self.cfg.pdf_method == 'browser' else NATIVE_VERSION)
+        return result
 
     def reusable(self, row, xml=None):
         if self.cfg.output_mode == "xml_pdf" and not xml:

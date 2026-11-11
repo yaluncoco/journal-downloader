@@ -195,13 +195,13 @@ class PdfTests(unittest.TestCase):
             with patch("pdf_export.BrowserRenderer.ensure_ready"), \
                  patch("pdf_export.BrowserRenderer.render", return_value=b"fakepdf"), \
                  patch("pdf_export.validate_pdf", return_value=1):
-                result = PdfExporter(PdfConfig(source.parent, output=output)).run()
+                result = PdfExporter(PdfConfig(source.parent, output=output, method="browser")).run()
                 self.assertEqual(result["saved"], 1)
                 self.assertEqual(result["pending"], 1)
-                result = PdfExporter(PdfConfig(source.parent, output=output)).run()
+                result = PdfExporter(PdfConfig(source.parent, output=output, method="browser")).run()
                 self.assertEqual(result["reused"], 1)
                 (output / "2024" / "b.pdf").write_bytes(b"corrupted")
-                result = PdfExporter(PdfConfig(source.parent, output=output)).run()
+                result = PdfExporter(PdfConfig(source.parent, output=output, method="browser")).run()
                 self.assertEqual(result["reused"], 0)
                 self.assertEqual(result["saved"], 1)
             self.assertIn("SHA-256", (state_dir(output) / "pdf_pending.jsonl").read_text(encoding="utf-8"))

@@ -43,7 +43,7 @@ class PipelineTests(unittest.TestCase):
         state = patch('library_store.STATE_HOME', self.root / 'app-state')
         state.start()
         self.addCleanup(state.stop)
-        self.cfg = Config('SYNTHETIC_KEY', PRESETS[0].url, 2024, 2024, self.root, interval=0, output_mode='xml_pdf')
+        self.cfg = Config('SYNTHETIC_KEY', PRESETS[0].url, 2024, 2024, self.root, interval=0, output_mode='xml_pdf', pdf_method='browser')
         self.base = self.root / PRESETS[0].issn
         self.rows = [{'doi': f'10.1016/j.example.2024.{i:06}', 'year': 2024, 'date': '2024-01-01',
                       'title': title} for i, title in enumerate(('Forest deep learning', 'Crop simulation', 'Forest monitoring'))]

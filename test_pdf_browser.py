@@ -37,7 +37,7 @@ class BrowserTests(unittest.TestCase):
     def test_failed_preflight_stops_before_article_api_request(self):
         library = self.root / PRESETS[0].issn
         cached_index(library, [{"doi": "10.1016/j.demo.a", "year": 2024, "title": "Example"}])
-        cfg = Config("SYNTHETIC_SECRET", PRESETS[0].url, 2024, 2024, self.root, output_mode="pdf")
+        cfg = Config("SYNTHETIC_SECRET", PRESETS[0].url, 2024, 2024, self.root, output_mode="pdf", pdf_method='browser')
         with patch("library_store.STATE_HOME", self.root / "state"), \
              patch("pdf_browser.browsers", return_value=[Path("edge.exe")]), \
              patch("pdf_browser.render_pdf", side_effect=BrowserFailure("Cannot print")):

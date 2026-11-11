@@ -107,6 +107,10 @@ def cached_search(state, spec):
 def website_url(journal, start, end, query, mode, scope, sort):
     params = search_spec(journal, start, end, query, mode, scope, sort)["body"].copy()
     params.pop("display")
+    # The website rejects quoted publication titles; its ISSN field provides
+    # the exact journal restriction that PUT's quoted pub expression provides.
+    params["pub"] = journal.name
+    params["docId"] = journal.issn
     params["sortBy"] = sort
     return "https://www.sciencedirect.com/search?" + urllib.parse.urlencode(params)
 
@@ -165,6 +169,7 @@ def collect_search(runner):
                        cfg.filter_mode, cfg.search_scope, cfg.search_sort)
     cached = cached_search(runner.state, spec)
     if cached and not cfg.refresh:
+        runner.log("检索范围：" + scope_description(cfg.search_scope))
         runner.log(f"复用 ScienceDirect 检索结果：{len(cached['records'])} 条（{cached['created_at']}）。更新论文列表可重新检索。")
         return cached
     runner.log("ScienceDirect API 检索：" + ("论文题名" if cfg.search_scope == "title" else "全部内容（不含参考文献）") +
@@ -236,3 +241,8 @@ def collect_search(runner):
     runner.log(f"ScienceDirect 命中 {total} 条，可处理 {len(unique)} 条。" +
                ("排除：" + "；".join(f"{key} {value} 条" for key, value in dropped.items()) if dropped else ""))
     return result
+
+
+def scope_description(scope):
+    return {"fulltext": "全文（不含参考文献）", "title": "仅论文标题，不检索摘要或正文",
+            "local": "仅本地候选题名，不检索摘要或正文"}[scope]

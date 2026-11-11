@@ -22,6 +22,8 @@ def read_pdf(path, expected=None):
         raise ValueError("PDF 校验记录不匹配")
     if validate_pdf(data, meta["doi"]) != meta.get("pages"):
         raise ValueError("PDF 页数不一致")
+    if meta.get('source_kind') == 'publisher' and meta.get('expected_pages') != meta['pages']:
+        raise ValueError('官方 PDF 页数与全文记录不符')
     year = next((int(p) for p in reversed(path.parts[:-1]) if re.fullmatch(r"\d{4}", p)), meta.get("year"))
     return {**meta, "doi": meta["doi"].lower(), "path": str(path), "year": year}
 

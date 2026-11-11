@@ -168,6 +168,9 @@ def _run(output, online=False, pdf=False):
                     assert config.api_key.encode() not in path.read_bytes()
             results["no_credential_on_disk"] = True
             if pdf:
+                import sys
+                spawned = []
+                sys.addaudithook(lambda event, args: spawned.append(True) if event == 'subprocess.Popen' else None)
                 from pdf_export import PdfConfig, PdfExporter
                 pdf_xml = Path(tmp) / "pdf-fixture" / "2024"
                 pdf_xml.mkdir(parents=True)
@@ -175,10 +178,16 @@ def _run(output, online=False, pdf=False):
                     b'<dc:title>Offline test article</dc:title><prism:coverDate>2024-01-01</prism:coverDate>')
                 data = data.replace(b'<article><body>',
                     b'<article><head><title>Offline test article</title></head><body>')
+                data = data.replace(b'</para>', (' Unicode α and é. '
+                    '<math xmlns="http://www.w3.org/1998/Math/MathML"><mfrac><mi>x</mi><mn>2</mn></mfrac></math>'
+                    '</para><table><label>Table 1</label><tgroup cols="2"><tbody>'
+                    '<row><entry>Frozen scientific content</entry><entry>42.5</entry></row>'
+                    '</tbody></tgroup></table>').encode('utf-8'), 1)
                 (pdf_xml / "sample.xml").write_bytes(data)
                 pdf_cfg = PdfConfig(source=pdf_xml.parent, output=Path(tmp) / "pdf-output")
-                first = PdfExporter(pdf_cfg).run()
-                assert first["saved"] == 1 and first["pending"] == 0
+                pdf_events = []
+                first = PdfExporter(pdf_cfg, emit=lambda **event: pdf_events.append(event)).run()
+                assert first["saved"] == 1 and first["pending"] == 0, [event.get('text') for event in pdf_events if event.get('kind') == 'log']
                 second = PdfExporter(pdf_cfg).run()
                 assert second["reused"] == 1
                 pdf_file = next(pdf_cfg.output.rglob("*.pdf"))
@@ -200,6 +209,8 @@ def _run(output, online=False, pdf=False):
                 only_pdf.run()
                 assert only_pdf.reused == 1 and only_pdf.new_count == 0
                 results['sequential_pdf_only_resume'] = True
+                results['native_pdf_no_subprocess'] = not spawned
+                assert not spawned
             if online:
                 results["online_metadata"] = []
                 for journal in PRESETS:

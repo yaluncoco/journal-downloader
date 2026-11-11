@@ -23,7 +23,11 @@ def main():
     if "--self-test" in sys.argv:
         from smoke_test import run
         index = sys.argv.index("--self-test")
-        run(Path(sys.argv[index + 1]), online="--online" in sys.argv, pdf="--pdf" in sys.argv)
+        try:
+            run(Path(sys.argv[index + 1]), online="--online" in sys.argv, pdf="--pdf" in sys.argv)
+        except RuntimeError:
+            # The report contains the failure; avoid a blocking frozen-app dialog.
+            raise SystemExit(1)
         return
     if "--pdf-export" in sys.argv:
         # Offline batch entry point for existing local XML and verified image caches.
@@ -35,7 +39,8 @@ def main():
         source, output = Path(sys.argv[index + 1]), Path(sys.argv[index + 2])
         try:
             result = PdfExporter(PdfConfig(source=source, output=output,
-                layout="single" if "--single-column" in sys.argv else "double", browser=browser)).run()
+                layout="single" if "--single-column" in sys.argv else "double", browser=browser,
+                method="browser" if browser or "--browser-render" in sys.argv else "native")).run()
             save_json(state_dir(output) / "offline_export_result.json", {"ok": result["pending"] == 0, **result})
         except Exception as error:
             save_json(state_dir(output) / "offline_export_result.json", {"ok": False, "error": str(error)})

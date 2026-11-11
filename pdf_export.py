@@ -15,6 +15,8 @@ from engine import (ActionRequired, Cancelled, Control, append_log, atomic_bytes
 from pdf_assets import ImageCache, image_objects
 from pdf_document import Article
 from pdf_browser import BrowserRenderer
+from pdf_native import NativeRenderer, NATIVE_VERSION
+from pdf_official import OfficialPdfClient, pdf_facts
 from library_inventory import read_xml, xml_files
 from library_store import state_dir, existing_sidecar, sidecar_path, migrate_pdf
 
@@ -31,6 +33,7 @@ class PdfConfig:
     layout: str = "double"
     output: Path | None = None
     browser: str = ""
+    method: str = "auto"
 
     def validate(self):
         if not self.source.is_dir():
@@ -39,6 +42,8 @@ class PdfConfig:
             raise ValueError("起止年份无效。")
         if self.layout not in ("single", "double") or self.network not in ("direct", "system"):
             raise ValueError("PDF 排版或网络设置无效。")
+        if self.method not in ('auto', 'native', 'browser'):
+            raise ValueError("PDF 生成方式无效。")
         if self.api_key and any(ord(c) > 126 or ord(c) < 33 for c in self.api_key):
             raise ValueError("API Key 不能含空格或换行。")
 
@@ -73,7 +78,9 @@ class PdfExporter:
         self.output = (cfg.output or library / "fulltext_pdf").resolve()
         self.state = state_dir(self.output)
         self.cache = self.state / "image-cache"
-        self.renderer = BrowserRenderer(self.state / "pdf-diagnostics.json", self.control, emit, cfg.browser)
+        self.renderer = (BrowserRenderer(self.state / "pdf-diagnostics.json", self.control, emit, cfg.browser)
+                         if cfg.method == 'browser' else NativeRenderer(self.control, emit))
+        self.official = OfficialPdfClient(self.key, cfg.network, self.control, emit) if cfg.method == 'auto' else None
 
     def count(self, total, saved, reused, stage):
         self.emit(kind="counts", total=total, saved=saved, reused=reused,
@@ -109,14 +116,36 @@ class PdfExporter:
         sidecar = existing_sidecar(source)
         if sidecar.exists() and sidecar.read_text(encoding="ascii").strip().lower() != digest:
             raise ValueError("XML 的 SHA-256 校验失败，请重新下载本篇 XML。")
-        article = Article(data)
-        if year is None and article.year.isdigit() and not self.cfg.start_year <= int(article.year) <= self.cfg.end_year:
+        identity = read_xml(source)
+        doi = identity['doi']
+        if year is None and identity['year'] is not None and not self.cfg.start_year <= identity['year'] <= self.cfg.end_year:
             return {"status": "outside_years"}
-        fingerprint = {"xml_sha256": digest, "layout": self.cfg.layout,
-                       "renderer": RENDERER_VERSION, "doi": article.doi}
+        fingerprint = {"xml_sha256": digest, "doi": doi}
+        if self.cfg.method != 'auto':
+            fingerprint.update(layout=self.cfg.layout if self.cfg.method == 'browser' else 'single',
+                               renderer=RENDERER_VERSION if self.cfg.method == 'browser' else NATIVE_VERSION)
         meta_path = sidecar_path(target)
         if self.reusable(target, existing_sidecar(target), fingerprint):
-            return {"status": "already_saved", "doi": article.doi, "pdf": str(target), "xml_sha256": digest}
+            return {"status": "already_saved", "doi": doi, "pdf": str(target), "xml_sha256": digest}
+        if self.official:
+            self.emit(kind="phase", text=f"正在获取并校验官方 PDF · {doi}")
+            facts = pdf_facts(data)
+            pdf, reason = self.official.get(doi, facts)
+            if pdf is not None:
+                pages = validate_pdf(pdf, doi)
+                self.control.checkpoint()
+                atomic_bytes(target, pdf)
+                save_json(meta_path, {**fingerprint, 'layout': 'publisher', 'renderer': 'publisher-1',
+                    'source_kind': 'publisher', 'expected_pages': facts['expected_pages'],
+                    'pdf_sha256': hashlib.sha256(pdf).hexdigest(), 'pages': pages, 'images': [],
+                    'created_at': timestamp(), 'year': year or identity['year'], 'title': identity.get('title', '')})
+                self.emit(kind='log', text=f'{doi} → 官方原版 PDF 已校验（{pages} 页），未启动浏览器。')
+                return {'status': 'pdf_saved', 'doi': doi, 'pdf': str(target), 'xml_sha256': digest,
+                        'pages': pages, 'source_kind': 'publisher'}
+            self.emit(kind='log', text=f'{doi} · {reason}')
+        article = Article(data)
+        fingerprint.update(layout=self.cfg.layout if self.cfg.method == 'browser' else 'single',
+                           renderer=RENDERER_VERSION if self.cfg.method == 'browser' else NATIVE_VERSION)
         self.renderer.ensure_ready()
         self.emit(kind="phase", text=f"正在准备 PDF 图片 · {article.title}")
         cache = ImageCache(self.cache / digest[:24], self.key, self.cfg.network, self.control, self.emit)
@@ -139,6 +168,7 @@ class PdfExporter:
         self.control.checkpoint()
         atomic_bytes(target, pdf)
         save_json(meta_path, {**fingerprint, "pdf_sha256": hashlib.sha256(pdf).hexdigest(),
+                             "source_kind": "xml_browser" if self.cfg.method == 'browser' else "xml_native",
                              "pages": pages, "images": image_meta, "created_at": timestamp(),
                              "year": year or (int(article.year) if article.year.isdigit() else None),
                              "title": article.title})
@@ -198,7 +228,8 @@ class PdfExporter:
                 save_lines(self.state / "pdf_pending.jsonl", pending)
         stage = "pdf_finished_with_pending" if pending else "pdf_finished"
         result = {"checked_at": timestamp(), "total": total, "saved": saved,
-                  "reused": reused, "pending": len(pending), "layout": self.cfg.layout}
+                  "reused": reused, "pending": len(pending), "method": self.cfg.method,
+                  "layout": self.cfg.layout if self.cfg.method == 'browser' else 'single_or_publisher'}
         save_json(self.state / "pdf_summary.json", result)
         self.count(total, saved, reused, stage)
         return result
@@ -207,6 +238,8 @@ class PdfExporter:
     def reusable(target, meta_path, expected):
         meta = load_json(meta_path, {})
         if not isinstance(meta, dict) or any(meta.get(k) != v for k, v in expected.items()):
+            return False
+        if meta.get('source_kind') == 'publisher' and meta.get('expected_pages') != meta.get('pages'):
             return False
         try:
             data = target.read_bytes()
