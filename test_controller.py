@@ -319,7 +319,12 @@ class ControllerTests(unittest.TestCase):
                     app.start()
                     app.worker.join(5)
                     self.assertFalse(app.worker.is_alive())
-                    app._poll()
+                    # UI polling has a time budget; a completed worker may leave
+                    # several batches of progress before the terminal event.
+                    deadline = time.monotonic() + 2
+                    while not app.events.empty() and time.monotonic() < deadline:
+                        app._poll()
+                    self.assertTrue(app.events.empty())
                     self.assertEqual(app.status.get(), "已达到本次数量")
                     self.assertEqual(app.progress.get(), 1)
                     self.assertIn("1/1", app.percent.get())

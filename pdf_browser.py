@@ -11,12 +11,15 @@ import time
 
 from app_runtime import clean_dll_search_path, independent_environment
 from browser_detection import browsers, browser_name
-from engine import ActionRequired, Cancelled, Control, VERSION, save_json, timestamp
+from browser_environment import configured_policies, process_elevated, profile_policy_conflict
+from engine import ActionRequired, Cancelled, Control, VERSION, load_json, save_json, timestamp
 from pdf_workspace import print_workspace
 
 PROBE_DOI = "10.0000/journal-downloader.pdf-check"
 PROBE = ('<!doctype html><html><meta charset="utf-8"><body>'
          '<h1>PDF environment check</h1><p>' + PROBE_DOI + '</p></body></html>')
+OUTPUT_GRACE_SECONDS = 30
+OUTPUT_STABLE_SECONDS = .3
 
 
 def browser_version(path):
@@ -53,13 +56,17 @@ def render_pdf(document, browser, work, control):
     html_path.write_text(document, encoding="utf-8")
     command = [str(browser), "--headless=new", "--disable-gpu", "--no-first-run",
         "--no-default-browser-check", "--disable-extensions", "--disable-background-networking",
-        "--disable-component-update", "--no-pdf-header-footer",
+        "--disable-component-update", "--no-pdf-header-footer", "--enable-logging",
         "--run-all-compositor-stages-before-draw", "--timeout=90000",
         "--host-resolver-rules=MAP * ~NOTFOUND",
         "--user-data-dir=" + str(work / "browser-profile"),
         "--print-to-pdf=" + str(pdf_path), html_path.as_uri()]
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     environment = independent_environment()
+    environment["CHROME_LOG_FILE"] = str(work / "browser-debug.log")
+    started = time.monotonic()
+    details = {"launcher_pid": None, "launcher_returncode": None,
+               "launcher_exited_before_pdf": False, "exit_grace_seconds": OUTPUT_GRACE_SECONDS}
     with (work / "browser.log").open("wb") as log:
         try:
             with clean_dll_search_path():
@@ -67,20 +74,54 @@ def render_pdf(document, browser, work, control):
                                            env=environment, creationflags=flags)
         except OSError as error:
             raise BrowserFailure(f"浏览器启动失败：{error}") from error
+        details["launcher_pid"] = process.pid
         deadline = time.monotonic() + 120
+        exited_at = None
+        stable_at, fingerprint = started, None
         try:
-            while process.poll() is None:
+            while True:
                 control.checkpoint()
-                if time.monotonic() > deadline:
+                now = time.monotonic()
+                returncode = process.poll()
+                if returncode is not None and exited_at is None:
+                    exited_at = now
+                    details["launcher_returncode"] = returncode
+                    details["launcher_exit_seconds"] = round(now - started, 3)
+                    details["launcher_exited_before_pdf"] = not pdf_path.is_file()
+                # A Windows launcher can hand off and exit before its browser
+                # writes the PDF. Keep HTML/profile alive through that handoff.
+                # Also avoid reading a PDF while it is still being written.
+                try:
+                    stat = pdf_path.stat()
+                    current = (stat.st_size, stat.st_mtime_ns)
+                    if current != fingerprint:
+                        stable_at, fingerprint = now, current
+                    elif now - stable_at >= OUTPUT_STABLE_SECONDS:
+                        data = pdf_path.read_bytes()
+                        if data.startswith(b"%PDF-") and b"%%EOF" in data[-2048:]:
+                            return data  # Caller still validates DOI and every page.
+                except OSError:
+                    fingerprint = None
+                if exited_at is not None:
+                    # Nonzero exits can still leave a valid PDF during shutdown,
+                    # but only a zero exit suggests a delayed successful handoff.
+                    grace = OUTPUT_GRACE_SECONDS if returncode == 0 else OUTPUT_STABLE_SECONDS + .2
+                    if now - exited_at >= grace:
+                        if returncode == 0:
+                            message = f"浏览器启动进程已退出（退出码 0），继续等待 {OUTPUT_GRACE_SECONDS} 秒仍未得到完整 PDF。"
+                        else:
+                            message = f"浏览器未输出完整 PDF（退出码 {returncode}）。"
+                        raise BrowserFailure(message, returncode)
+                if now > deadline:
                     raise BrowserFailure("浏览器排版超过 120 秒。")
-                control.stop.wait(.2)
-            control.checkpoint()
-            if not pdf_path.is_file():
-                raise BrowserFailure(f"浏览器未输出 PDF（退出码 {process.returncode}）。", process.returncode)
-            # A valid PDF can precede a browser crash during shutdown. The caller
-            # verifies the complete PDF and DOI; exit status alone is not proof.
-            return pdf_path.read_bytes()
+                control.stop.wait(.1)
         finally:
+            details["elapsed_seconds"] = round(time.monotonic() - started, 3)
+            details["profile_created"] = (work / "browser-profile").is_dir()
+            details["pdf_exists"] = pdf_path.is_file()
+            with suppress(OSError):
+                details["pdf_bytes"] = pdf_path.stat().st_size if pdf_path.exists() else 0
+                save_json(work / "launch.json", details)
             if process.poll() is None:
                 with suppress(OSError, subprocess.SubprocessError):
                     if os.name == "nt":
@@ -103,6 +144,7 @@ class BrowserRenderer:
         self.candidates = None
         self.attempts = []
         self.versions = {}
+        self.policies = {}
 
     def _save(self, ok, error=None):
         for browser in self.candidates or []:
@@ -110,6 +152,7 @@ class BrowserRenderer:
                 self.versions[str(browser)] = browser_version(browser)
         save_json(self.report, {"version": VERSION, "checked_at": timestamp(), "ok": ok,
             "platform": platform.platform(), "frozen": bool(getattr(sys, "frozen", False)),
+            "process_elevated": process_elevated(),
             "application": sys.executable, "browser_versions": self.versions,
             "browser_selection": self.selection or "auto", "error": error,
             "selected_browser": str(self.selected) if self.selected else None,
@@ -122,19 +165,31 @@ class BrowserRenderer:
         # read-only installation folder; no profile belonging to the user is used.
         record = {"browser": str(browser), "phase": phase, "time": timestamp()}
         try:
+            if str(browser) not in self.policies:
+                self.policies[str(browser)] = configured_policies(browser)
+            record["configured_policies"] = self.policies[str(browser)]
+            if profile_policy_conflict(record["configured_policies"]):
+                raise BrowserFailure("检测到 UserDataDir 策略，可能覆盖独立 PDF 配置目录。"
+                                     "为避免使用已有浏览器会话，未启动此浏览器；请联系管理员或选择其他浏览器。")
             with print_workspace() as work:
                 record["work_directory"] = str(work)
                 try:
                     data = render_pdf(document, browser, work, self.control)
                     record["pages"] = validate_pdf(data, doi)
                 except Exception:
-                    with suppress(OSError):
-                        with (work / "browser.log").open("rb") as log:
-                            log.seek(max(0, log.seek(0, 2) - 8000))
-                            stderr = log.read().decode("utf-8", errors="replace")
-                        record["stderr"] = re.sub(r"(?i)(apikey|api_key|token|authorization)([=: ]+)[^\s&]+",
+                    logs = {"stderr": work / "browser.log", "browser_debug": work / "browser-debug.log",
+                            "profile_debug": work / "browser-profile/chrome_debug.log"}
+                    for label, path in logs.items():
+                        with suppress(OSError):
+                            with path.open("rb") as log:
+                                log.seek(max(0, log.seek(0, 2) - 8000))
+                                stderr = log.read().decode("utf-8", errors="replace")
+                            record[label] = re.sub(r"(?i)(apikey|api_key|token|authorization)([=: ]+)[^\s&]+",
                                                    r"\1\2[hidden]", stderr)
                     raise
+                finally:
+                    if launch := load_json(work / "launch.json", {}):
+                        record["launch"] = launch
                 record["ok"] = True
                 return data
         except Cancelled:
@@ -165,8 +220,8 @@ class BrowserRenderer:
         for browser in choices:
             try:
                 self._attempt(PROBE, PROBE_DOI, browser, "environment-check")
-            except BrowserFailure:
-                self.emit(kind="log", text=f"{browser_name(browser)} 的 PDF 检测未通过。")
+            except BrowserFailure as error:
+                self.emit(kind="log", text=f"{browser_name(browser)} 的 PDF 检测未通过：{error}")
                 continue
             self.selected = browser
             self._save(True)
