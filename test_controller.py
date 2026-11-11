@@ -22,9 +22,9 @@ class ControllerTests(unittest.TestCase):
         state.start()
         self.addCleanup(state.stop)
 
-    def quiet_app(self):
+    def quiet_app(self, settings=None):
         app = App(check_updates=False, remember_credentials=False, scan_libraries=False,
-                  settings={}, visible=False)
+                  settings={} if settings is None else settings, visible=False)
         app.withdraw()
         def cleanup():
             app._cancel_update_notice()
@@ -39,6 +39,69 @@ class ControllerTests(unittest.TestCase):
             gc.collect()
         self.addCleanup(cleanup)
         return app
+
+    def test_search_defaults_and_legacy_filter_migration(self):
+        app = self.quiet_app({'title_filter': 'forest, crop', 'filter_mode': 'all'})
+        self.assertEqual(app.search_scope.get(), '本地题名筛选')
+        self.assertEqual(app.filter_mode.get(), '全部词组')
+        app.search_scope.set('全文 · ScienceDirect')
+        app.filter_mode.set('官网语法')
+        app.search_scope.set('本地题名筛选')
+        self.assertEqual(app.filter_mode.get(), '任一词组')
+
+    def test_search_preview_runs_in_worker_and_never_downloads(self):
+        from test_article_search import entry, response
+        from test_engine import Opener
+        app = self.quiet_app()
+        self.assertEqual(app.search_scope.get(), '全文 · ScienceDirect')
+        self.assertEqual(app.filter_mode.get(), '官网语法')
+        with tempfile.TemporaryDirectory() as tmp, patch.object(controller, 'SETTINGS_DIR', Path(tmp) / 'settings'), \
+             patch('engine.elsevier_opener', return_value=Opener([response([entry()])])), \
+             patch.object(Downloader, 'fetch', side_effect=AssertionError('preview fetched fulltext')):
+            app.key.set('SYNTHETIC_PREVIEW_KEY')
+            app.start_year.set('2024')
+            app.end_year.set('2024')
+            app.output.set(tmp)
+            app.title_filter.set('forest')
+            app.start(preview=True)
+            app.worker.join(5)
+            self.assertFalse(app.worker.is_alive())
+            until = time.monotonic() + 2
+            while not app.events.empty() and time.monotonic() < until:
+                app._poll()
+            self.assertEqual(app.status.get(), '检索完成')
+            self.assertEqual(app.metrics['total'].get(), '1')
+            self.assertTrue(app.search_results_window.winfo_exists())
+            self.assertFalse(list(Path(tmp).rglob('*.xml')))
+            saved = json.loads((Path(tmp) / 'settings/settings.json').read_text(encoding='utf-8'))
+            self.assertEqual(saved['search_scope'], 'fulltext')
+            self.assertEqual(saved['filter_mode'], 'native')
+
+    def test_api_query_change_does_not_show_crossref_title_count(self):
+        from article_search import collect_search
+        from test_article_search import entry, response
+        from test_engine import Opener
+        app = self.quiet_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Config('SYNTHETIC_PREVIEW_KEY', PRESETS[0].url, 2024, 2024, Path(tmp),
+                         title_filter='forest', filter_mode='native', search_scope='fulltext')
+            runner = Downloader(cfg)
+            runner.initialize_library()
+            runner.opener = Opener([response([entry()])])
+            collect_search(runner)
+            cached_index(runner.base, [{'doi': '10.1016/j.other', 'title': 'crop', 'year': 2024, 'date': '2024'}])
+            app.output.set(tmp)
+            app.start_year.set('2024')
+            app.end_year.set('2024')
+            app.scan_detect = False
+            for query, expected in [('forest', '1'), ('crop', '待获取')]:
+                app.title_filter.set(query)
+                app._start_library_scan()
+                app.scan_worker.join(5)
+                until = time.monotonic() + 2
+                while not app.events.empty() and time.monotonic() < until:
+                    app._poll()
+                self.assertEqual(app.metrics['total'].get(), expected)
 
     def test_pdf_footer_reports_complete_partial_empty_and_stopped_truthfully(self):
         app = self.quiet_app()
@@ -349,7 +412,7 @@ class ControllerTests(unittest.TestCase):
                 self.assertIsNone(app.worker)
 
     def test_update_dialog_shows_available_release(self):
-        app = App(check_updates=False, remember_credentials=False)
+        app = App(check_updates=False, remember_credentials=False, settings={}, scan_libraries=False)
         app.withdraw()
         release = Release("v99.0.0", "", "", "", 100000, "")
         try:
@@ -380,7 +443,7 @@ class ControllerTests(unittest.TestCase):
                 self.emit(kind="counts", total=2, saved=1, reused=1, pending=1,
                           stage="pdf_finished_with_pending")
 
-        app = App(check_updates=False, remember_credentials=False)
+        app = App(check_updates=False, remember_credentials=False, settings={}, scan_libraries=False)
         app.withdraw()
         try:
             app.active_job = "pdf"
@@ -402,7 +465,7 @@ class ControllerTests(unittest.TestCase):
             root = Path(tmp)
             cached_index(root / PRESETS[0].issn, [{"doi": "10.1016/j.demo.2024.123456", "year": 2024,
                                                 "date": "2024", "title": "Test article"}])
-            app = App(check_updates=False, remember_credentials=False)
+            app = App(check_updates=False, remember_credentials=False, settings={}, scan_libraries=False)
             app.withdraw()
             app.key.set("CONTROLLER_PRIVATE_TEST_KEY")
             app.url.set(PRESETS[0].url)

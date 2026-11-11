@@ -41,4 +41,16 @@
 - `download_output.py` 负责输出选择及安全清理。PDF 的哈希、页流、DOI 与校验记录通过后才移除相应 XML；失败、停止或写入异常保留 XML。
 - `pdf_inventory.py` 负责实际 PDF 的完整性盘点，`library_preview.py` 负责后台扫描和丢弃旧目录返回的结果。无校验记录的 PDF 不算已核验完成。
 - 本次下载数量按最终要求的完整输出计数。仅 PDF 模式依靠本机校验记录与 PDF 内容续传，不能仅凭文件存在跳过。移动目录或换电脑后校验记录不会跟随，可能需要重建。
-- 所有检索与分类均离线进行。此次自动化验证使用合成文献与模拟网络，不读取用户 Key，不消耗真实全文 API 配额。
+- 期刊目录检索与分类离线进行；论文关键词可选择 ScienceDirect 在线 API 或本地题名筛选。自动化回归使用合成数据和模拟网络；真实接口探测只检索元数据，不下载全文。
+
+## ScienceDirect 论文关键词检索（v1.7.0）
+
+实现核对日期：2026-11-11。采用 Elsevier 推荐的 Search V2 原生 PUT 接口；无浏览器抓取、无 Scopus 结果替代。
+
+- 接口文档：https://dev.elsevier.com/documentation/ScienceDirectSearchAPI.wadl
+- 字段、语法、分页、请求/响应示例：https://dev.elsevier.com/tecdoc_sdsearch_migration.html
+- 字段和授权说明：https://dev.elsevier.com/sd_search_views.html
+- 请求地址：`https://api.elsevier.com/content/search/sciencedirect`。
+- `qs` 搜索内容（不含参考文献），`title` 搜索文章标题，`pub` 限定刊名，`date` 限定年份；`display.offset/show/sortBy` 用于分页与排序。布尔运算、词组与语言处理交由服务端执行。官网核对入口使用相同条件，不承诺网页与 API 在任意权限、索引时刻下条数相等。
+- 刊名使用引号词组并检查响应刊名及目录别名，防止未加引号的词语检索混入其他期刊。响应无有效 DOI 或年份时不猜测下载地址，排除情况写入运行记录。
+- 完整查询以条件哈希独立缓存；没有响应或权限失败不计为零结果；超过软件单次完整获取上限 6,000 条时要求缩小检索范围，不缓存截断列表。

@@ -19,7 +19,7 @@ def main():
     if not args.iscc.is_file():
         parser.error("Install Inno Setup 7 and pass the path to ISCC.exe")
     if not args.skip_tests:
-        subprocess.run([sys.executable, "-m", "unittest", "discover", "-v"], cwd=ROOT, check=True)
+        subprocess.run([sys.executable, "-X", "utf8", "-m", "unittest", "discover", "-v"], cwd=ROOT, check=True)
     output = ROOT / "release" / f"v{VERSION}"
     output.mkdir(parents=True, exist_ok=True)
     work = ROOT / "build" / f"v{VERSION}"

@@ -4,6 +4,8 @@
 
 常用入口保留 **Remote Sensing of Environment（RSE）** 与 **ISPRS Journal of Photogrammetry and Remote Sensing**。点击「检索全部期刊」可按英文名称、关键词或 ISSN 搜索内置目录，也支持粘贴期刊地址。
 
+**v1.7.0** 接入 ScienceDirect Search V2：论文关键词可检索全部内容（不含参考文献）或仅题名，支持大写 AND / OR / NOT、双引号词组、括号组合及相关度 / 最新发表排序。提供分页预览和官网核对入口；相同条件复用缓存，查询变更不会覆盖完整文库索引。旧版已保存的题名筛选仍按原方式执行，可手动切换到 API 检索。
+
 **v1.6.5** 修复浏览器启动进程返回 0 后，PDF 尚未写好就判定失败并清理临时目录的时序问题。现在会等待延迟输出及文件稳定，再校验 PDF 内容；无输出仍在限定时间后停止。诊断增加启动时序、运行权限、浏览器文件日志和相关已配置策略，检测到 `UserDataDir` 策略覆盖独立目录时停止该浏览器候选，避免使用已有浏览器会话。
 
 **v1.6.4** 补强 Edge 安装位置识别，自动模式优先使用 Microsoft Edge；合成 PDF 和高级设置中可手动指定 `msedge.exe` 或 `chrome.exe`，本机记忆并供下载时合成、单独合成及环境检测共用。日志显示实际浏览器、版本和位置。XML 下载不依赖浏览器，不需要安装 Chrome。
@@ -24,7 +26,7 @@ v1.5.0 新增逐篇 XML→PDF、仅 PDF 输出、下载前题名词组筛选、�
 
 1. 连接校园网或学校 VPN。
 2. 输入自己的 API Key，选择预置期刊或粘贴期刊网址。
-3. 选择起止年份、保存位置、本次数量（0 表示不限）和输出方式：仅 XML / XML + PDF / 仅 PDF。可填写题名关键词后开始下载。
+3. 选择起止年份、保存位置、本次数量（0 表示不限）和输出方式：仅 XML / XML + PDF / 仅 PDF。需要筛选时填写论文关键词，选择检索范围，先点「预览」核对题名再开始下载。
 4. 已有 XML 时，点击「合成 PDF」，选择文库文件夹和双栏 / 单栏版式，开始合成。
 
 仅 XML 下载不需要浏览器；PDF 合成需要电脑已安装 Microsoft Edge 或 Google Chrome，二者任一个即可。程序自动优先检测 Edge，使用独立的后台进程，不需要把 Edge 设为默认浏览器或提前打开浏览器窗口。安装位置未被识别时，在「合成 PDF」或「高级设置」中点击「选择程序…」，选择 Edge 的 `msedge.exe`，再运行「检测 PDF 环境」。手动选择只使用指定的浏览器，点击「自动检测」可恢复自动回退。
@@ -50,7 +52,9 @@ https://www.sciencedirect.com/search?pub=Remote+Sensing+of+Environment&date=2024
 - 目录加入官方学科筛选（包括农学×计算机、林学×计算机），显示 2025 中科院参考大类分区、排名、Top 与收录索引；缺失信息明确标注。
 - 检索统一 Computer/Computers、and/&；正式刊名和顺序前缀优先，具体输入 `computer and electronic` 可将目标期刊排首位。
 - 下载时可逐篇合成 PDF；默认保留 XML，明确选择「仅 PDF」才会在该篇 PDF 校验后移除 XML。合成失败保留 XML，下次复用并重试。
-- 下载前按论文题名匹配任一 / 全部词组，完整候选索引保持不变；只匹配题名，不声称检索全文或作者关键词。
+- 论文检索直接使用 ScienceDirect Search V2 PUT 接口；官网语法如 `(forest OR crop) AND "deep learning" NOT urban`。也可在「设置」中选任一 / 全部词组，由软件生成 OR / AND 表达式。按期刊精确词组查询并校验返回刊名，避免混入相似期刊。
+- 点「预览」只取元数据，结果按 25 条分页；按 API 返回顺序下载，数量限制与续传沿用此顺序。输入时不联网，API 每页最多 100 条、默认间隔 3 秒；相同查询复用已完成缓存。「更新论文列表」强制刷新。超过 6,000 条要求缩小范围，不静默截断。
+- 搜索接口需相应 Key / 机构授权；401/403 不解释为零结果，也不自动降级。可手动选「本地题名筛选」，继续使用 Crossref 题名的任一 / 全部词组匹配。关键词留空时沿用完整候选列表流程，不调用搜索 API。
 - 切换目录时立即清除旧 PDF 状态，按所选目录与年份重新检查 PDF 实际内容、哈希和 DOI。
 - 打开软件、切换保存位置或年份时，后台读取已有 XML 并显示完整数量；选择具体文库、`fulltext_xml` 或年份文件夹可识别原文库。点击开始后继续下载缺少的论文。
 - 按 DOI 识别改过文件名的完整 XML；下载前重新检查完整性，避免重复下载。
@@ -98,12 +102,12 @@ python -m venv .build-env
 .\build.ps1 -ISCC "C:\Program Files\Inno Setup 7\ISCC.exe"
 ```
 
-安装器编译需安装官方 Inno Setup 7。产物为 `release/v1.6.5/JournalDownloader-Setup.exe`；应用目录为 `release/v1.6.5/JournalDownloader/`。XML 下载引擎使用 Python 标准库；界面使用 CustomTkinter，图片校验使用 Pillow，PDF 校验使用 pypdf，使用 PyInstaller 打包。浏览器不随程序分发。
+安装器编译需安装官方 Inno Setup 7。产物为 `release/v1.7.0/JournalDownloader-Setup.exe`；应用目录为 `release/v1.7.0/JournalDownloader/`。XML 下载引擎使用 Python 标准库；界面使用 CustomTkinter，图片校验使用 Pillow，PDF 校验使用 pypdf，使用 PyInstaller 打包。浏览器不随程序分发。
 
 打包后离线自检：
 
 ```powershell
-.\release\v1.6.5\JournalDownloader\JournalDownloader.exe --self-test "$env:TEMP\journal-downloader-test.json"
+.\release\v1.7.0\JournalDownloader\JournalDownloader.exe --self-test "$env:TEMP\journal-downloader-test.json"
 ```
 
 加入 `--online` 可额外验证两个期刊的在线元数据查询，不需要真实 API Key。
@@ -112,7 +116,7 @@ python -m venv .build-env
 无网络批量合成（要求图片已缓存；API Key 不通过命令行传递）：
 
 ```powershell
-.\release\v1.6.5\JournalDownloader\JournalDownloader.exe --pdf-export "D:\文库\fulltext_xml" "D:\文库\fulltext_pdf"
+.\release\v1.7.0\JournalDownloader\JournalDownloader.exe --pdf-export "D:\文库\fulltext_xml" "D:\文库\fulltext_pdf"
 ```
 
 结果保存在本机应用数据中的 `offline_export_result.json`，输出目录只放 PDF；可加 `--single-column` 改为单栏。首次获取图片请使用界面输入 Key。
@@ -135,6 +139,7 @@ PDF 检测或离线合成可追加 `--pdf-browser "C:\Program Files (x86)\Micros
 | `library_inventory.py` | 本地 XML 扫描、文库识别与按 DOI 续传 |
 | `library_preview.py`、`pdf_inventory.py` | 后台目录状态预览、PDF 完整性扫描 |
 | `article_filter.py`、`download_output.py` | 题名筛选、逐篇输出与 PDF 完成后清理 |
+| `article_search.py`、`article_search_ui.py` | ScienceDirect API 查询、独立缓存、检索设置及分页预览 |
 | `journal_catalog.py`、`catalog_ui.py`、`journals.json` | 离线期刊检索与目录数据 |
 | `journal_metadata.py`、`journal_metadata.json`、`build_metadata.py` | 官方学科、2025 分区参考与可复现数据转换 |
 | `build_catalog.py` | 从官方 XLSX 清单构建目录快照 |

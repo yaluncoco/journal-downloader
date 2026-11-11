@@ -11,10 +11,11 @@ from engine import ActionRequired, Cancelled, Config, Control, Downloader, PRESE
 from credential_store import load_key, save_key, forget_key
 SETTINGS_DIR = Path(os.environ.get("LOCALAPPDATA",str(Path.home()))) / "JournalXMLDownloader"
 SETTING_FIELDS = {"url", "start_year", "end_year", "output", "network", "issn", "max_downloads",
-                  "remember_key", "output_mode", "title_filter", "filter_mode", "pdf_browser"}
+                  "remember_key", "output_mode", "title_filter", "filter_mode", "pdf_browser", "search_scope", "search_sort"}
 
 from library_preview import LibraryPreview
 from article_filter import OUTPUT_MODES, FILTER_MODES
+from article_search import SCOPES, SORTS
 
 
 class Controller(LibraryPreview):
@@ -30,7 +31,12 @@ class Controller(LibraryPreview):
         self.max_downloads = tk.StringVar(value=str(self.settings.get("max_downloads", 0)))
         self.output_mode = tk.StringVar(value=next((label for label, mode in OUTPUT_MODES.items() if mode == self.settings.get("output_mode")), "仅 XML"))
         self.title_filter = tk.StringVar(value=self.settings.get("title_filter", ""))
-        self.filter_mode = tk.StringVar(value=next((label for label, mode in FILTER_MODES.items() if mode == self.settings.get("filter_mode")), "任一词组"))
+        legacy_filter = bool(self.settings.get("title_filter")) and "search_scope" not in self.settings
+        scope = self.settings.get("search_scope", "local" if legacy_filter else "fulltext")
+        self.search_scope = tk.StringVar(value=next((label for label, code in SCOPES.items() if code == scope), next(iter(SCOPES))))
+        self.search_sort = tk.StringVar(value=next((label for label, code in SORTS.items() if code == self.settings.get("search_sort")), "相关度优先"))
+        self.filter_mode = tk.StringVar(value=next((label for label, mode in FILTER_MODES.items() if mode == self.settings.get("filter_mode")), "任一词组" if scope == "local" else "官网语法"))
+        self.search_hint = tk.StringVar()
         self.output = tk.StringVar(value=self.settings.get("output", str(Path.home() / "Documents" / "期刊全文下载")))
         self.direct = tk.BooleanVar(value=self.settings.get("network", "direct") != "system")
         self.issn = tk.StringVar(value=self.settings.get("issn", ""))
@@ -113,7 +119,8 @@ class Controller(LibraryPreview):
                 pass
         self.settings["network"] = "direct" if self.direct.get() else "system"
         self.settings.update(output_mode=OUTPUT_MODES[self.output_mode.get()], title_filter=self.title_filter.get().strip(),
-                             filter_mode=FILTER_MODES[self.filter_mode.get()], pdf_browser=self.pdf_browser.get())
+                             filter_mode=FILTER_MODES[self.filter_mode.get()], pdf_browser=self.pdf_browser.get(),
+                             search_scope=SCOPES[self.search_scope.get()], search_sort=SORTS[self.search_sort.get()])
 
     def _browse(self):
         folder = filedialog.askdirectory(title="选择保存位置或已有 XML 文库", initialdir=self.output.get() if Path(self.output.get()).exists() else str(Path.home()))
@@ -146,6 +153,7 @@ class Controller(LibraryPreview):
             "max_downloads": cfg.max_downloads,
             "output_mode": cfg.output_mode, "title_filter": cfg.title_filter, "filter_mode": cfg.filter_mode,
             "pdf_browser": cfg.pdf_browser,
+            "search_scope": cfg.search_scope, "search_sort": cfg.search_sort,
             "remember_key": self.remember_key.get(),
         }
         save_json(SETTINGS_DIR / "settings.json", self.settings)
@@ -160,7 +168,7 @@ class Controller(LibraryPreview):
         self.stop_button.configure(state="normal" if busy else "disabled")
         self.update_button.configure(state="disabled" if busy else "normal")
 
-    def start(self):
+    def start(self, preview=False):
         if self.worker and self.worker.is_alive():
             return
         try:
@@ -179,10 +187,15 @@ class Controller(LibraryPreview):
                          network="direct" if self.direct.get() else "system", issn=self.issn.get().strip().upper(),
                          refresh=self.refresh_index.get(), retry_failed=self.retry_failed.get(), max_downloads=maximum,
                          output_mode=OUTPUT_MODES[self.output_mode.get()], title_filter=self.title_filter.get().strip(),
-                         filter_mode=FILTER_MODES[self.filter_mode.get()], pdf_browser=self.pdf_browser.get())
+                         filter_mode=FILTER_MODES[self.filter_mode.get()], pdf_browser=self.pdf_browser.get(),
+                         search_scope=SCOPES[self.search_scope.get()], search_sort=SORTS[self.search_sort.get()])
             cfg.validate()
             if self.advanced_window and self.advanced_window.winfo_exists():
                 self.advanced_window.destroy()
+            for name in ("search_window", "search_results_window"):
+                win = getattr(self, name, None)
+                if win and win.winfo_exists():
+                    win.destroy()
             self._save_settings(cfg)
             self._persist_api_key()
         except (ValueError, OSError) as error:
@@ -192,8 +205,8 @@ class Controller(LibraryPreview):
         self._cancel_library_scan()
         if getattr(self, "catalog_window", None) and self.catalog_window.winfo_exists():
             self.catalog_window.destroy()
-        self.active_job = "xml"
-        self.pipeline_pdf = cfg.output_mode != "xml"
+        self.active_job = "search" if preview else "xml"
+        self.pipeline_pdf = not preview and cfg.output_mode != "xml"
         self.saved_caption.set("完整输出" if self.pipeline_pdf else "已保存全文")
         if self.pipeline_pdf:
             self.pipeline_counts = {}
@@ -211,21 +224,29 @@ class Controller(LibraryPreview):
         self.percent.set("准备中")
         self.status.set("正在准备")
         self.detail.set("正在识别期刊并建立论文列表…")
-        self._log(f"开始任务：{start}–{end} 年。")
-        self._log(f"输出方式：{self.output_mode.get()}。" + ("每篇 PDF 校验完成后，再处理下一篇。" if self.pipeline_pdf else ""))
-        self._log(f"本次最多成功下载 {maximum} 篇；已保存的完整文件不计入。" if maximum else "下载数量不限。")
+        self._log(f"{'预览检索' if preview else '开始任务'}：{start}–{end} 年。")
+        if preview:
+            self._log("只获取论文列表，不下载全文；相同条件可复用检索缓存。")
+        else:
+            self._log(f"输出方式：{self.output_mode.get()}。" + ("每篇 PDF 校验完成后，再处理下一篇。" if self.pipeline_pdf else ""))
+            self._log(f"本次最多成功下载 {maximum} 篇；已保存的完整文件不计入。" if maximum else "下载数量不限。")
         if end > datetime.now().year:
             self._log("所选范围包含未来年份，只能获取目前已登记、已发布且有权限的内容。")
-        self.worker = threading.Thread(target=self._work, args=(cfg, self.control), daemon=False)
+        self.worker = threading.Thread(target=self._work, args=(cfg, self.control, preview), daemon=False)
         self.worker.start()
 
-    def _work(self, cfg, control):
+    def _work(self, cfg, control, preview=False):
         runner = None
         outcome = "complete"
         text = "本次任务结束。"
         try:
             runner = Downloader(cfg, emit=lambda **event: self.events.put(event), control=control)
-            runner.run()
+            if preview:
+                result = runner.preview()
+                self.events.put({"kind": "search_results", **result})
+                text = f"检索完成：可处理 {len(result['records'])} 条。核对预览后可开始下载。"
+            else:
+                runner.run()
         except Cancelled:
             outcome, text = "stopped", "已停止。再次开始会校验已有文件并继续下载。"
         except ActionRequired as error:
@@ -391,6 +412,9 @@ class Controller(LibraryPreview):
                 self._update_notice_event(event)
             elif kind == "library_preview":
                 self._library_preview_event(event)
+            elif kind == "search_results":
+                if not self.closing:
+                    self._show_search_results(event)
             elif kind == "library_scan_progress":
                 if (event["generation"] == self.scan_generation and not self.closing
                         and not (self.worker and self.worker.is_alive())):
@@ -422,7 +446,8 @@ class Controller(LibraryPreview):
                     variable.set(str(event[name]))
                 self.stages = event["stage"]
                 if event.get("title_filter"):
-                    self.local_hint.set(f"题名筛选：{event['total']}/{event['candidate_total']} 条 · {self.output_mode.get()}")
+                    label = "本地题名筛选" if event.get("search_scope", "local") == "local" else "ScienceDirect 检索"
+                    self.local_hint.set(f"{label}：{event['total']}/{event['candidate_total']} 条 · {self.output_mode.get()}")
                 if self.active_job == "pdf":
                     self.pdf_progress.stop()
                     self.pdf_progress.configure(mode="determinate")
@@ -440,7 +465,12 @@ class Controller(LibraryPreview):
                 outcome = event["outcome"]
                 text = event["text"]
                 if outcome == "complete":
-                    if self.active_job == "diagnostic":
+                    if self.active_job == "search":
+                        self.status.set("检索完成")
+                        self.progress.configure(mode="determinate")
+                        self.progress.set(0)
+                        self.percent.set("待下载")
+                    elif self.active_job == "diagnostic":
                         self.status.set("PDF 环境检测通过")
                     elif self.active_job == "pdf":
                         if self.stages == "pdf_finished_with_pending":
@@ -460,7 +490,7 @@ class Controller(LibraryPreview):
                         text = "未保存条目已记录到本机应用数据；可勾选「重新尝试」后再次开始。"
                     elif self.metrics["total"].get() == "0":
                         self.status.set("未找到记录")
-                        text = "所选年份暂无已登记的论文。可调整年份，或勾选「更新论文列表」重试。"
+                        text = "当前期刊、年份与检索条件没有可处理的记录。可调整条件，或勾选「更新论文列表」重试。"
                     else:
                         self.status.set("下载完成")
                         text = "所选列表中的条目均已保存并通过校验。"

@@ -5,6 +5,7 @@ import time
 
 from engine import Cancelled, Journal, library_path, local_journal, parse_journal_url, valid_issn, load_json
 from article_filter import filter_records, OUTPUT_MODES, FILTER_MODES
+from article_search import SCOPES, SORTS, validate_search, uses_api, search_spec, cached_search
 
 
 class LibraryPreview:
@@ -17,7 +18,7 @@ class LibraryPreview:
         if not self.scan_libraries:
             return
         for variable in (self.output, self.url, self.start_year, self.end_year, self.issn,
-                         self.output_mode, self.title_filter, self.filter_mode):
+                         self.output_mode, self.title_filter, self.filter_mode, self.search_scope, self.search_sort):
             variable.trace_add("write", self._queue_library_scan)
         self._queue_library_scan()
 
@@ -73,8 +74,9 @@ class LibraryPreview:
                 return
             root = Path(self.output.get().strip()).expanduser()
             query, filter_mode = self.title_filter.get(), FILTER_MODES[self.filter_mode.get()]
+            search_scope, search_sort = SCOPES[self.search_scope.get()], SORTS[self.search_sort.get()]
             output_mode = OUTPUT_MODES[self.output_mode.get()]
-            filter_records([], query, filter_mode)
+            validate_search(query, filter_mode, search_scope, search_sort)
         except (OSError, ValueError) as error:
             self.local_hint.set(str(error))
             self.library = None
@@ -117,18 +119,27 @@ class LibraryPreview:
                 desired_pdfs = {doi for doi in compatible if pdfs["saved"][doi].get("layout") == "double"
                                 and pdfs["saved"][doi].get("renderer") == RENDERER_VERSION}
                 complete = xml_dois if output_mode == "xml" else desired_pdfs if output_mode == "pdf" else xml_dois & desired_pdfs
-                cache = load_json(state_dir(base) / "indexes" / f"{start}-{end}.json", {})
-                if not cache:
-                    cache = load_json(base / "indexes" / f"{start}-{end}.json", {})
                 total = None
                 listed_saved = 0
                 candidate_total = None
-                if (isinstance(cache, dict) and cache.get("complete") is True and cache.get("issn") == (target or journal).issn
+                if uses_api(search_scope, query):
+                    spec = search_spec(target, start, end, query, filter_mode, search_scope, search_sort)
+                    cache = cached_search(state_dir(base), spec)
+                    if cache:
+                        rows = cache["records"]
+                        candidate_total = cache["results_found"]
+                        dois = {row["doi"].lower() for row in rows}
+                        total, listed_saved = len(dois), len(dois.intersection(complete))
+                else:
+                    cache = load_json(state_dir(base) / "indexes" / f"{start}-{end}.json", {})
+                    if not cache:
+                        cache = load_json(base / "indexes" / f"{start}-{end}.json", {})
+                if (not uses_api(search_scope, query) and isinstance(cache, dict) and cache.get("complete") is True and cache.get("issn") == (target or journal).issn
                         and cache.get("years") == [start, end] and isinstance(cache.get("records"), list)):
                     rows = cache["records"]
                     if all(isinstance(row, dict) and isinstance(row.get("doi"), str) for row in rows):
                         candidate_total = len(rows)
-                        dois = {row["doi"].lower() for row in filter_records(rows, query, filter_mode)}
+                        dois = {row["doi"].lower() for row in (filter_records(rows, query, filter_mode) if query.strip() else rows)}
                         total = len(dois)
                         listed_saved = len(dois.intersection(complete))
                 checkpoint()
@@ -183,7 +194,8 @@ class LibraryPreview:
         self.percent.set(f"{event['listed_saved'] / total:.0%}" if total else "本地已读取")
         self.status.set("可继续下载" if count else "准备就绪")
         self.detail.set("开始后按输出方式校验并续传；缺失或损坏的文件会继续处理。" +
-                        (f"题名筛选匹配 {total}/{event['candidate_total']} 条。" if self.title_filter.get().strip() and total is not None else ""))
+                        (f"检索条件匹配 {total}/{event['candidate_total']} 条。" if self.title_filter.get().strip() and total is not None else
+                         "点击「预览」获取此条件的结果。" if self.title_filter.get().strip() else ""))
         saved, expected = event.get("pdf_saved", 0), event.get("pdf_total", count)
         self.pdf_progress.stop()
         self.pdf_progress.configure(mode="determinate", progress_color="#24976C" if expected and saved == expected else "#087F8C")

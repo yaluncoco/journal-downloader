@@ -77,6 +77,19 @@ def _run(output, online=False, pdf=False):
         assert len(filter_records([{'title': 'Forest study'}, {'title': 'Other'}], 'forest')) == 1
         assert app.output_mode.get() in ('仅 XML', 'XML + PDF', '仅 PDF')
         results['prefix_subject_reference_and_filters'] = True
+        from article_search import expression, search_spec
+        assert expression('forest, crop', 'all') == '"forest" AND "crop"'
+        assert search_spec(PRESETS[0], 2024, 2024, 'forest', 'native', 'fulltext', 'relevance')['body']['qs'] == 'forest'
+        assert app.search_scope.get() == '全文 · ScienceDirect'
+        app._search_dialog()
+        app.search_window.withdraw()
+        app.search_window.destroy()
+        app._show_search_results({'records': [{'title': 'Synthetic preview', 'date': '2024-01-01',
+            'doi': '10.1016/j.example.2024.1'}], 'candidate_total': 1, 'scope': 'fulltext',
+            'query': 'forest', 'journal': PRESETS[0].name, 'years': [2024, 2024]})
+        app.search_results_window.withdraw()
+        app.search_results_window.destroy()
+        results['sciencedirect_search_and_preview_ui'] = True
         app.active_job = "pdf"
         app.events.put({"kind": "counts", "total": 2, "saved": 2, "reused": 1,
                         "pending": 0, "stage": "pdf_finished"})

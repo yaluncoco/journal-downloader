@@ -1,7 +1,8 @@
 """Parameterized, resumable Elsevier XML downloader. Only the standard library.
 
-No credential is written to paper folders or logs. Crossref supplies a dated candidate list;
-Elsevier's authenticated Article Retrieval API supplies entitled full text.
+No credential is written to paper folders or logs. Crossref supplies the full candidate
+list, ScienceDirect Search supplies optional filtered metadata, and Article Retrieval
+supplies entitled full text.
 """
 from __future__ import annotations
 
@@ -27,8 +28,9 @@ import uuid
 
 from xml_utils import atomic_bytes, inspect_xml, plain_text, save_fulltext
 from library_store import state_dir, sidecar_path, existing_sidecar, migrate_library
+from article_search import uses_api
 
-VERSION = "1.6.5"
+VERSION = "1.7.0"
 AGENT = f"JournalXMLDownloader/{VERSION} (personal research)"
 FULLTEXT = {"fulltext_structured", "fulltext_rawtext"}
 NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)
@@ -121,6 +123,8 @@ class Config:
     title_filter: str = ""
     filter_mode: str = "any"
     pdf_browser: str = ""
+    search_scope: str = "local"
+    search_sort: str = "relevance"
 
     def validate(self):
         parse_journal_url(self.url)
@@ -138,8 +142,8 @@ class Config:
             raise ValueError("下载数量必须是非负整数，0 表示不限。")
         if self.output_mode not in ("xml", "xml_pdf", "pdf"):
             raise ValueError("输出方式无效。")
-        from article_filter import filter_records
-        filter_records([], self.title_filter, self.filter_mode)
+        from article_search import validate_search
+        validate_search(self.title_filter, self.filter_mode, self.search_scope, self.search_sort)
 
 
 class Cancelled(Exception):
@@ -631,10 +635,11 @@ class Downloader:
                    "total": len(self.records), "saved": len(self.saved), "reused": self.reused,
                    "downloaded_this_run": self.new_count, "pending": len(pending),
                    "max_downloads": self.config.max_downloads, "download_target": self.download_target,
-                   "failed_or_review": len(self.failures), "source": "Crossref candidate list; Elsevier XML"}
+                   "failed_or_review": len(self.failures), "source": "ScienceDirect Search V2; Elsevier XML" if uses_api(self.config.search_scope, self.config.title_filter) else "Crossref candidate list; Elsevier XML"}
         summary.update(output_mode=self.config.output_mode, candidate_total=self.candidate_total,
                        excluded=max(0, self.candidate_total - len(self.records)),
-                       title_filter=self.config.title_filter, filter_mode=self.config.filter_mode)
+                       title_filter=self.config.title_filter, filter_mode=self.config.filter_mode,
+                       search_scope=self.config.search_scope, search_sort=self.config.search_sort)
         save_json(self.state / "download_summary.json", summary)
         save_lines(self.state / "pending.jsonl", pending)
         self.emit(kind="counts", **summary)
@@ -642,11 +647,38 @@ class Downloader:
             self.emit(kind="pdf_counts", total=len(self.records), saved=len(self.saved),
                       pending=len(pending), stage=stage)
 
-    def run(self):
+    def initialize_library(self):
         self.journal = self.resolve()
         self.base = library_path(Path(self.config.output), self.journal)
         self.base.mkdir(parents=True, exist_ok=True)
         self.emit(kind="library", path=str(self.base), journal=self.journal.name, issn=self.journal.issn)
+
+    def select_records(self):
+        if uses_api(self.config.search_scope, self.config.title_filter):
+            from article_search import collect_search
+            result = collect_search(self)
+            self.records = result["records"]
+            self.candidate_total = result["results_found"]
+        else:
+            candidates = self.collect()
+            self.candidate_total = len(candidates)
+            save_lines(self.state / "manifest.jsonl", candidates)
+            from article_filter import filter_records
+            self.records = filter_records(candidates, self.config.title_filter, self.config.filter_mode) if self.config.title_filter.strip() else candidates
+            if self.config.title_filter.strip():
+                self.log(f"本地题名筛选：{len(candidates)} 条中匹配 {len(self.records)} 条。只匹配 Crossref 题名，不检索摘要或正文。")
+
+    def preview(self):
+        self.initialize_library()
+        with library_lock(self.base, managed=True):
+            migrate_library(self.base)
+            self.select_records()
+            return {"records": self.records, "candidate_total": self.candidate_total,
+                    "scope": self.config.search_scope, "query": self.config.title_filter,
+                    "journal": self.journal.name, "years": [self.config.start_year, self.config.end_year]}
+
+    def run(self):
+        self.initialize_library()
         with library_lock(self.base, managed=True), ExitStack() as stack:
             migrate_library(self.base)
             save_json(self.state / "journal.json", {"name": self.journal.name, "issn": self.journal.issn, "url": self.journal.url})
@@ -656,13 +688,7 @@ class Downloader:
             self.emit(kind="phase", text="正在读取保存位置中已有的 XML…")
             self.inventory = scan_existing(self.base, checkpoint=self.control.checkpoint)
             self.log(f"本地 XML 校验：{len(self.inventory['saved'])} 篇完整，{self.inventory['invalid']} 个文件未通过检查。")
-            candidates = self.collect()
-            self.candidate_total = len(candidates)
-            save_lines(self.state / "manifest.jsonl", candidates)
-            from article_filter import filter_records
-            self.records = filter_records(candidates, self.config.title_filter, self.config.filter_mode)
-            if self.config.title_filter.strip():
-                self.log(f"题名筛选：{len(candidates)} 条中匹配 {len(self.records)} 条，排除 {len(candidates) - len(self.records)} 条。关键词只匹配论文题名。")
+            self.select_records()
             if self.config.output_mode != "xml":
                 from download_output import DownloadOutput
                 self.output_processor = DownloadOutput(self.config, self.base, self.emit, self.control)

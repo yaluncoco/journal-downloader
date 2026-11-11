@@ -64,7 +64,11 @@ class LayoutTests(unittest.TestCase):
                     self.assert_inside(button, self.app)
                 self.assert_inside(self.app.form, self.app.content, vertical=False)
                 self.assert_inside(self.app.sidebar, self.app.content, vertical=False)
+                self.assertTrue(self.app.content.winfo_ismapped())
+                self.assertAlmostEqual(self.app.content.winfo_width(), self.app.content._parent_canvas.winfo_width(), delta=2)
                 self.assert_inside(self.app.key_entry, self.app.form, vertical=False)
+                if (width, height, scale) == (1080, 790, 1):
+                    self.assert_inside(self.app.search_actions, self.app.content._parent_canvas)
                 self.assertGreater(self.app.journal_label.cget("wraplength"), 0)
                 years = self.app.form.grid_slaves(row=9)[0]
                 for child in years.winfo_children():
@@ -78,7 +82,7 @@ class LayoutTests(unittest.TestCase):
     def test_dialogs_fit_work_area_and_catalog_results_wrap(self):
         self.resize(1000, 680, 1.5)
         for opener, name in ((self.app._pdf_dialog, "pdf_window"), (self.app._advanced, "advanced_window"),
-                             (self.app._catalog_dialog, "catalog_window")):
+                             (self.app._catalog_dialog, "catalog_window"), (self.app._search_dialog, "search_window")):
             with self.subTest(dialog=name), patch("window_layout.work_area", return_value=(0, 0, 1000, 680)):
                 opener()
                 window = getattr(self.app, name)

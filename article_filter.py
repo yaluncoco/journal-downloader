@@ -3,7 +3,7 @@ import html
 import re
 import unicodedata
 
-FILTER_MODES = {"任一词组": "any", "全部词组": "all"}
+FILTER_MODES = {"官网语法": "native", "任一词组": "any", "全部词组": "all"}
 OUTPUT_MODES = {"仅 XML": "xml", "XML + PDF": "xml_pdf", "仅 PDF": "pdf"}
 
 

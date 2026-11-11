@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw
 from controller import Controller, SETTINGS_DIR
 from update_ui import UpdateUI
 from catalog_ui import CatalogUI
+from article_search_ui import ArticleSearchUI
 from engine import PRESETS, VERSION, load_json, parse_journal_url, local_journal
 from window_layout import fit_window, wrap_to, scroll_body, work_area
 
@@ -24,7 +25,7 @@ LINE = "#E5ECF1"
 FONT = "Microsoft YaHei UI"
 
 
-class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
+class App(ctk.CTk, Controller, UpdateUI, CatalogUI, ArticleSearchUI):
     def __init__(self, *, check_updates=True, remember_credentials=True, scan_libraries=True,
                  settings=None, visible=True):
         ctk.set_appearance_mode("light")
@@ -56,6 +57,7 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         self.small_font = ctk.CTkFont(FONT, 12)
         self.bold_font = ctk.CTkFont(FONT, 15, weight="bold")
         self._layout()
+        self._init_search()
         defer_canvas_paints(self)
         self._layout_after = None
         self._layout_mode = None
@@ -103,6 +105,11 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         height = self.winfo_height() / scale if self.winfo_ismapped() else self._current_height
         short = compact and height < 380
         mode = (width < 920, compact, short)
+        # When a scrolled page becomes shorter after reflow/DPI changes, Tk can
+        # unmap the embedded frame beyond the viewport and retain its old width.
+        # Bring it into view so geometry and the scroll region can settle again.
+        if mode != self._layout_mode or (self.content._parent_canvas.winfo_ismapped() and not self.content.winfo_ismapped()):
+            self.content._parent_canvas.yview_moveto(0)
         if mode == self._layout_mode:
             return
         self._layout_mode = mode
@@ -344,22 +351,33 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         card = self.card(parent)
         card.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         card.grid_columnconfigure(0, weight=1)
-        self.label(card, "输出与筛选", font=self.bold_font).grid(row=0, column=0, sticky="w", padx=18, pady=(18, 12))
+        self.label(card, "输出与筛选", font=self.bold_font).grid(row=0, column=0, sticky="w", padx=18, pady=(12, 6))
         self.editable(ctk.CTkSegmentedButton(card, values=list(OUTPUT_MODES), variable=self.output_mode,
-            height=36, corner_radius=9, border_width=3, fg_color="#F0F4F7",
+            height=32, corner_radius=9, border_width=3, fg_color="#F0F4F7",
             selected_color="#D3EEEE", selected_hover_color="#BFE4E5", unselected_color="#F0F4F7",
             unselected_hover_color="#E0E9EF", text_color=INK, font=self.small_font,
             dynamic_resizing=False)).grid(row=1, column=0, sticky="ew", padx=16)
         self.label(card, "合成 PDF 支持 Edge / Chrome；下载 XML\n无需浏览器。仅 PDF 校验成功后移除 XML。",
-            font=self.small_font, color=MUTED, justify="left", wraplength=252).grid(row=2, column=0, sticky="w", padx=18, pady=(7, 15))
-        self.label(card, "题名关键词（可留空）", font=self.small_font, color=INK).grid(row=3, column=0, sticky="w", padx=18, pady=(0, 6))
-        self.entry(card, self.title_filter, placeholder_text="如 forest, deep learning", width=240).grid(row=4, column=0, sticky="ew", padx=16)
-        self.editable(ctk.CTkOptionMenu(card, values=list(FILTER_MODES), variable=self.filter_mode,
-            height=30, width=122, corner_radius=8, fg_color="#ECF1F5", button_color="#E0E8EE",
+            font=self.small_font, color=MUTED, justify="left", wraplength=252).grid(row=2, column=0, sticky="w", padx=18, pady=(5, 6))
+        from article_search import SCOPES
+        self.label(card, "论文关键词（留空获取全部）", font=self.small_font, color=INK).grid(row=3, column=0, sticky="w", padx=18, pady=(0, 6))
+        self.search_entry = self.entry(card, self.title_filter, placeholder_text='如 forest AND "deep learning"', width=240)
+        self.search_entry.configure(height=36)
+        self.search_entry.grid(row=4, column=0, sticky="ew", padx=16)
+        self.editable(ctk.CTkOptionMenu(card, values=list(SCOPES), variable=self.search_scope,
+            height=30, width=180, corner_radius=8, fg_color="#ECF1F5", button_color="#E0E8EE",
             button_hover_color="#D3EEEE", text_color=INK, font=self.small_font,
-            dropdown_font=self.small_font)).grid(row=5, column=0, sticky="w", padx=18, pady=(8, 6))
-        self.label(card, "逗号分隔词组，仅匹配题名；不检索正文\n或作者关键词。空白表示下载全部题名。",
-            font=self.small_font, color=MUTED, justify="left", wraplength=252).grid(row=6, column=0, sticky="w", padx=18, pady=(0, 17))
+            dropdown_font=self.small_font)).grid(row=5, column=0, sticky="ew", padx=16, pady=(8, 6))
+        self.label(card, textvariable=self.search_hint, font=self.small_font, color=MUTED,
+                   justify="left", wraplength=252).grid(row=6, column=0, sticky="w", padx=18, pady=(0, 4))
+        actions = self.search_actions = ctk.CTkFrame(card, fg_color="transparent")
+        actions.grid(row=7, column=0, sticky="ew", padx=16, pady=(0, 12))
+        for column, (text, command) in enumerate((("设置", self._search_dialog),
+                ("预览", lambda: self.start(preview=True)), ("官网", self._open_search_website))):
+            actions.grid_columnconfigure(column, weight=1)
+            button = self.editable(self.secondary(actions, text, command, width=65))
+            button.configure(height=32)
+            button.grid(row=0, column=column, sticky="ew", padx=(0, 5) if column < 2 else 0)
 
     def _pdf_dialog(self):
         if self.worker and self.worker.is_alive():
