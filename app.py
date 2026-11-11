@@ -4,6 +4,9 @@ import sys
 
 
 def main():
+    browser = ""
+    if "--pdf-browser" in sys.argv:
+        browser = sys.argv[sys.argv.index("--pdf-browser") + 1]
     if "--ui-check" in sys.argv:
         from ui_check import run
         run(Path(sys.argv[sys.argv.index("--ui-check") + 1]))
@@ -13,7 +16,7 @@ def main():
         from engine import ActionRequired
         index = sys.argv.index("--pdf-check")
         try:
-            diagnose(Path(sys.argv[index + 1]))
+            diagnose(Path(sys.argv[index + 1]), browser=browser)
         except ActionRequired:
             pass  # The machine-readable report already contains each attempt.
         return
@@ -32,7 +35,7 @@ def main():
         source, output = Path(sys.argv[index + 1]), Path(sys.argv[index + 2])
         try:
             result = PdfExporter(PdfConfig(source=source, output=output,
-                layout="single" if "--single-column" in sys.argv else "double")).run()
+                layout="single" if "--single-column" in sys.argv else "double", browser=browser)).run()
             save_json(state_dir(output) / "offline_export_result.json", {"ok": result["pending"] == 0, **result})
         except Exception as error:
             save_json(state_dir(output) / "offline_export_result.json", {"ok": False, "error": str(error)})

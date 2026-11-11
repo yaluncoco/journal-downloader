@@ -19,7 +19,8 @@ def settle(window, seconds=0.25):
 class LayoutTests(unittest.TestCase):
     def setUp(self):
         with patch("ui.load_json", return_value={}):
-            self.app = App(check_updates=False, remember_credentials=False, scan_libraries=False)
+            self.app = App(check_updates=False, remember_credentials=False, scan_libraries=False,
+                           settings={}, visible=False)
         self.app.attributes("-alpha", 0)
         self.errors = []
         self.app.report_callback_exception = lambda *args: self.errors.append(args)

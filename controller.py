@@ -11,7 +11,7 @@ from engine import ActionRequired, Cancelled, Config, Control, Downloader, PRESE
 from credential_store import load_key, save_key, forget_key
 SETTINGS_DIR = Path(os.environ.get("LOCALAPPDATA",str(Path.home()))) / "JournalXMLDownloader"
 SETTING_FIELDS = {"url", "start_year", "end_year", "output", "network", "issn", "max_downloads",
-                  "remember_key", "output_mode", "title_filter", "filter_mode"}
+                  "remember_key", "output_mode", "title_filter", "filter_mode", "pdf_browser"}
 
 from library_preview import LibraryPreview
 from article_filter import OUTPUT_MODES, FILTER_MODES
@@ -44,6 +44,39 @@ class Controller(LibraryPreview):
         self.active_job = "xml"
         self.local_hint = tk.StringVar(value="正在读取保存位置…")
         self.pdf_status = tk.StringVar(value="PDF · 尚未合成")
+        self.pdf_browser = tk.StringVar(value=self.settings.get("pdf_browser", ""))
+        self.pdf_browser_caption = tk.StringVar(value=self._browser_caption())
+
+    def _browser_caption(self):
+        from browser_detection import browser_name
+        path = self.pdf_browser.get()
+        return f"{browser_name(path)} · {path}" if path else "自动检测（优先 Microsoft Edge）"
+
+    def _set_pdf_browser(self, value):
+        if self.worker and self.worker.is_alive():
+            return
+        self.pdf_browser.set(value)
+        self.pdf_browser_caption.set(self._browser_caption())
+        self.settings["pdf_browser"] = value
+        try:
+            save_json(SETTINGS_DIR / "settings.json", {k: v for k, v in self.settings.items() if k in SETTING_FIELDS})
+        except OSError:
+            self._log("浏览器选择仅在本次运行有效，设置文件未保存。")
+
+    def _choose_pdf_browser(self, parent):
+        if self.worker and self.worker.is_alive():
+            return
+        from browser_detection import selected_browser
+        value = filedialog.askopenfilename(parent=parent, title="选择 Edge 或 Chrome 程序",
+            filetypes=[("浏览器程序（msedge.exe / chrome.exe）", "*.exe")])
+        if not value:
+            return
+        try:
+            path = selected_browser(value)
+        except (OSError, ValueError) as error:
+            messagebox.showerror("请选择浏览器程序", str(error), parent=parent)
+            return
+        self._set_pdf_browser(str(path))
 
     def editable(self, widget, state="normal"):
         self.mutable.append((widget, state))
@@ -80,7 +113,7 @@ class Controller(LibraryPreview):
                 pass
         self.settings["network"] = "direct" if self.direct.get() else "system"
         self.settings.update(output_mode=OUTPUT_MODES[self.output_mode.get()], title_filter=self.title_filter.get().strip(),
-                             filter_mode=FILTER_MODES[self.filter_mode.get()])
+                             filter_mode=FILTER_MODES[self.filter_mode.get()], pdf_browser=self.pdf_browser.get())
 
     def _browse(self):
         folder = filedialog.askdirectory(title="选择保存位置或已有 XML 文库", initialdir=self.output.get() if Path(self.output.get()).exists() else str(Path.home()))
@@ -112,6 +145,7 @@ class Controller(LibraryPreview):
             "output": str(cfg.output), "network": cfg.network, "issn": cfg.issn,
             "max_downloads": cfg.max_downloads,
             "output_mode": cfg.output_mode, "title_filter": cfg.title_filter, "filter_mode": cfg.filter_mode,
+            "pdf_browser": cfg.pdf_browser,
             "remember_key": self.remember_key.get(),
         }
         save_json(SETTINGS_DIR / "settings.json", self.settings)
@@ -145,7 +179,7 @@ class Controller(LibraryPreview):
                          network="direct" if self.direct.get() else "system", issn=self.issn.get().strip().upper(),
                          refresh=self.refresh_index.get(), retry_failed=self.retry_failed.get(), max_downloads=maximum,
                          output_mode=OUTPUT_MODES[self.output_mode.get()], title_filter=self.title_filter.get().strip(),
-                         filter_mode=FILTER_MODES[self.filter_mode.get()])
+                         filter_mode=FILTER_MODES[self.filter_mode.get()], pdf_browser=self.pdf_browser.get())
             cfg.validate()
             if self.advanced_window and self.advanced_window.winfo_exists():
                 self.advanced_window.destroy()
@@ -222,11 +256,12 @@ class Controller(LibraryPreview):
         self._busy(True)
         self.status.set("正在检测 PDF 环境")
         self._log("离线检测 PDF 环境，不读取论文或 API Key，不消耗 API 配额。")
+        browser = self.pdf_browser.get()  # Read Tk state only on the UI thread.
         def work():
             outcome, text = "complete", f"PDF 环境检测通过。诊断文件：{report}"
             try:
                 from pdf_browser import diagnose
-                diagnose(report, self.control, lambda **event: self.events.put(event))
+                diagnose(report, self.control, lambda **event: self.events.put(event), browser=browser)
             except Cancelled:
                 outcome, text = "stopped", "已停止 PDF 环境检测。"
             except ActionRequired as error:
@@ -247,7 +282,7 @@ class Controller(LibraryPreview):
             cfg = PdfConfig(source=Path(source).expanduser().resolve(), api_key=self.key.get().strip(),
                             network="direct" if self.direct.get() else "system",
                             start_year=int(self.start_year.get()), end_year=int(self.end_year.get()),
-                            layout=layout)
+                            layout=layout, browser=self.pdf_browser.get())
             cfg.validate()
             self._persist_api_key()
         except (ValueError, OSError) as error:

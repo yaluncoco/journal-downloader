@@ -4,6 +4,8 @@
 
 常用入口保留 **Remote Sensing of Environment（RSE）** 与 **ISPRS Journal of Photogrammetry and Remote Sensing**。点击「检索全部期刊」可按英文名称、关键词或 ISSN 搜索内置目录，也支持粘贴期刊地址。
 
+**v1.6.4** 补强 Edge 安装位置识别，自动模式优先使用 Microsoft Edge；合成 PDF 和高级设置中可手动指定 `msedge.exe` 或 `chrome.exe`，本机记忆并供下载时合成、单独合成及环境检测共用。日志显示实际浏览器、版本和位置。XML 下载不依赖浏览器，不需要安装 Chrome。
+
 **v1.6.3** 优化启动、连续缩放与大文库响应：控件改用无需私有字体的 Canvas 绘制，避免滚动条和下拉框重绘时反复刷新整窗；准备好首次布局后再显示。目录预览只保留一个扫描线程，未变化文件在本次运行中复用校验结果，下载续传仍重新校验。期刊结果卡片复用并分批更新，运行日志批量写入，界面事件分时处理。
 
 **v1.6.2** 修复深层临时目录下 PDF 检测失败却无法导出报告的问题：自动选择较短、可写的工作目录，诊断补充浏览器版本、实际工作路径和失败退出码；测试页通过不会覆盖论文合成失败的结果。
@@ -23,7 +25,7 @@ v1.5.0 新增逐篇 XML→PDF、仅 PDF 输出、下载前题名词组筛选、�
 3. 选择起止年份、保存位置、本次数量（0 表示不限）和输出方式：仅 XML / XML + PDF / 仅 PDF。可填写题名关键词后开始下载。
 4. 已有 XML 时，点击「合成 PDF」，选择文库文件夹和双栏 / 单栏版式，开始合成。
 
-PDF 合成需要电脑已安装 Microsoft Edge 或 Google Chrome。程序使用独立的后台浏览器进程，不需要打开浏览器窗口或安装 Python。
+仅 XML 下载不需要浏览器；PDF 合成需要电脑已安装 Microsoft Edge 或 Google Chrome，二者任一个即可。程序自动优先检测 Edge，使用独立的后台进程，不需要把 Edge 设为默认浏览器或提前打开浏览器窗口。安装位置未被识别时，在「合成 PDF」或「高级设置」中点击「选择程序…」，选择 Edge 的 `msedge.exe`，再运行「检测 PDF 环境」。手动选择只使用指定的浏览器，点击「自动检测」可恢复自动回退。
 
 右上角向上箭头用于软件更新。启动后在后台检查一次正式版本，有新版显示红点。点击「下载并安装」后下载并验证 SHA-256，再关闭当前窗口、打开安装向导；完成安装后可启动新版。安装日志保存在 `%LOCALAPPDATA%\JournalXMLDownloader\updates\版本号\setup.log`。临时网络失败最多重试两次，下载校验失败不会执行安装。
 
@@ -94,12 +96,12 @@ python -m venv .build-env
 .\build.ps1 -ISCC "C:\Program Files\Inno Setup 7\ISCC.exe"
 ```
 
-安装器编译需安装官方 Inno Setup 7。产物为 `release/v1.6.0/JournalDownloader-Setup.exe`；应用目录为 `release/v1.6.0/JournalDownloader/`。XML 下载引擎使用 Python 标准库；界面使用 CustomTkinter，图片校验使用 Pillow，PDF 校验使用 pypdf，使用 PyInstaller 打包。浏览器不随程序分发。
+安装器编译需安装官方 Inno Setup 7。产物为 `release/v1.6.4/JournalDownloader-Setup.exe`；应用目录为 `release/v1.6.4/JournalDownloader/`。XML 下载引擎使用 Python 标准库；界面使用 CustomTkinter，图片校验使用 Pillow，PDF 校验使用 pypdf，使用 PyInstaller 打包。浏览器不随程序分发。
 
 打包后离线自检：
 
 ```powershell
-.\release\v1.6.0\JournalDownloader\JournalDownloader.exe --self-test "$env:TEMP\journal-downloader-test.json"
+.\release\v1.6.4\JournalDownloader\JournalDownloader.exe --self-test "$env:TEMP\journal-downloader-test.json"
 ```
 
 加入 `--online` 可额外验证两个期刊的在线元数据查询，不需要真实 API Key。
@@ -108,10 +110,12 @@ python -m venv .build-env
 无网络批量合成（要求图片已缓存；API Key 不通过命令行传递）：
 
 ```powershell
-.\release\v1.6.0\JournalDownloader\JournalDownloader.exe --pdf-export "D:\文库\fulltext_xml" "D:\文库\fulltext_pdf"
+.\release\v1.6.4\JournalDownloader\JournalDownloader.exe --pdf-export "D:\文库\fulltext_xml" "D:\文库\fulltext_pdf"
 ```
 
 结果保存在本机应用数据中的 `offline_export_result.json`，输出目录只放 PDF；可加 `--single-column` 改为单栏。首次获取图片请使用界面输入 Key。
+
+PDF 检测或离线合成可追加 `--pdf-browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"`，只测试和调用这一浏览器；路径应替换成目标电脑的实际位置。命令行未指定时自动检测，不读取界面的已保存浏览器设置。
 
 ## 代码结构
 
@@ -135,6 +139,7 @@ python -m venv .build-env
 | `pdf_assets.py` | 图片对象获取、重试与缓存校验 |
 | `pdf_document.py` | XML、CALS 表格、MathML 到安全排版 HTML |
 | `pdf_export.py` | PDF 批量合成、后台浏览器和断点校验 |
+| `browser_detection.py`、`pdf_browser.py` | Edge/Chrome 自动识别与手动路径、独立打印和离线诊断 |
 | `updater.py`、`update_ui.py` | 检查版本、校验安装包、独立进程启动安装向导及完成记录 |
 | `test_engine.py`、`test_controller.py`、`test_pdf.py`、`test_updater.py`、`test_storage.py` | 引擎、界面、PDF、更新、数据迁移和 Key 加密测试 |
 | `smoke_test.py` | 打包程序自检 |

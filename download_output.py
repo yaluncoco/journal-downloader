@@ -10,7 +10,8 @@ from pdf_inventory import read_pdf, scan_pdfs
 class DownloadOutput:
     def __init__(self, cfg, base, emit, control):
         self.cfg, self.base, self.emit, self.control = cfg, base.resolve(), emit, control
-        self.exporter = PdfExporter(PdfConfig(base, cfg.api_key, cfg.network, cfg.start_year, cfg.end_year), emit, control)
+        self.exporter = PdfExporter(PdfConfig(base, cfg.api_key, cfg.network, cfg.start_year, cfg.end_year,
+                                             browser=cfg.pdf_browser), emit, control)
         # Also accept renamed legacy XML directly inside the selected library.
         self.exporter.xml_root = self.base
         self.pdfs = {}

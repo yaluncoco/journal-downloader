@@ -86,6 +86,13 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual((again.reused, again.new_count), (3, 0))
         self.assertEqual(self.order, [])
 
+    def test_selected_browser_reaches_sequential_pdf_exporter(self):
+        self.cfg.pdf_browser = 'C:/Synthetic Edge/msedge.exe'
+        self.cfg.max_downloads = 1
+        runner = self.runner()
+        runner.run()
+        self.assertEqual(runner.output_processor.exporter.renderer.selection, self.cfg.pdf_browser)
+
     def test_pdf_only_resume_without_xml_and_repair_truncated_pdf(self):
         self.cfg.output_mode = 'pdf'
         self.runner().run()

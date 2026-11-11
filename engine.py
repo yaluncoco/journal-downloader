@@ -28,7 +28,7 @@ import uuid
 from xml_utils import atomic_bytes, inspect_xml, plain_text, save_fulltext
 from library_store import state_dir, sidecar_path, existing_sidecar, migrate_library
 
-VERSION = "1.6.3"
+VERSION = "1.6.4"
 AGENT = f"JournalXMLDownloader/{VERSION} (personal research)"
 FULLTEXT = {"fulltext_structured", "fulltext_rawtext"}
 NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)
@@ -120,6 +120,7 @@ class Config:
     output_mode: str = "xml"
     title_filter: str = ""
     filter_mode: str = "any"
+    pdf_browser: str = ""
 
     def validate(self):
         parse_journal_url(self.url)

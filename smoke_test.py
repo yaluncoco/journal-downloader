@@ -40,7 +40,8 @@ def _run(output, online=False, pdf=False):
         results["tk"] = str(root.tk.call("info", "patchlevel"))
         root.destroy()
         from ui import App
-        app = App(check_updates=False, remember_credentials=False, scan_libraries=False)
+        app = App(check_updates=False, remember_credentials=False, scan_libraries=False,
+                  settings={}, visible=False)
         app.withdraw()
         app.update_idletasks()
         app._on_preset("ISPRS")

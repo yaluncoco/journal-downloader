@@ -5,12 +5,12 @@ import os
 from pathlib import Path
 import platform
 import re
-import shutil
 import subprocess
 import sys
 import time
 
 from app_runtime import clean_dll_search_path, independent_environment
+from browser_detection import browsers, browser_name
 from engine import ActionRequired, Cancelled, Control, VERSION, save_json, timestamp
 from pdf_workspace import print_workspace
 
@@ -39,29 +39,6 @@ def browser_version(path):
         return ".".join(str(n) for n in (values[2] >> 16, values[2] & 65535, values[3] >> 16, values[3] & 65535))
     except (OSError, ValueError):
         return None
-
-
-def browsers():
-    candidates = []
-    for name in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA"):
-        folder = os.environ.get(name)
-        if folder:
-            candidates.extend(Path(folder) / suffix for suffix in (
-                "Microsoft/Edge/Application/msedge.exe", "Google/Chrome/Application/chrome.exe"))
-    if os.name == "nt":
-        import winreg
-        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-            for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
-                for name in ("msedge.exe", "chrome.exe"):
-                    with suppress(OSError):
-                        with winreg.OpenKey(hive, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + name,
-                                            0, winreg.KEY_READ | view) as key:
-                            candidates.append(Path(str(winreg.QueryValueEx(key, "")[0]).strip('"')))
-    for name in ("msedge", "chrome", "google-chrome", "chromium", "chromium-browser"):
-        binary = shutil.which(name)
-        if binary:
-            candidates.append(Path(binary))
-    return list(dict.fromkeys(path.resolve() for path in candidates if path.is_file()))
 
 
 class BrowserFailure(ValueError):
@@ -117,22 +94,24 @@ def render_pdf(document, browser, work, control):
 
 
 class BrowserRenderer:
-    def __init__(self, report, control=None, emit=lambda **event: None):
+    def __init__(self, report, control=None, emit=lambda **event: None, browser=""):
         self.report = Path(report)
         self.control = control or Control()
         self.emit = emit
+        self.selection = browser
         self.selected = None
         self.candidates = None
         self.attempts = []
         self.versions = {}
 
-    def _save(self, ok):
+    def _save(self, ok, error=None):
         for browser in self.candidates or []:
             if str(browser) not in self.versions:
                 self.versions[str(browser)] = browser_version(browser)
         save_json(self.report, {"version": VERSION, "checked_at": timestamp(), "ok": ok,
             "platform": platform.platform(), "frozen": bool(getattr(sys, "frozen", False)),
             "application": sys.executable, "browser_versions": self.versions,
+            "browser_selection": self.selection or "auto", "error": error,
             "selected_browser": str(self.selected) if self.selected else None,
             "candidates": [str(path) for path in self.candidates or []], "attempts": self.attempts[-20:]})
 
@@ -175,7 +154,11 @@ class BrowserRenderer:
             return
         self.emit(kind="phase", text="正在检测 PDF 环境（离线，不使用 API 配额）…")
         if self.candidates is None:
-            self.candidates = browsers()
+            try:
+                self.candidates = browsers(self.selection)
+            except (OSError, ValueError) as error:
+                self._save(False, str(error))
+                raise ActionRequired(str(error) + f" 诊断文件：{self.report}") from error
         preferred = self.selected
         self.selected = None
         choices = list(dict.fromkeys(([preferred] if preferred else []) + self.candidates))
@@ -183,15 +166,20 @@ class BrowserRenderer:
             try:
                 self._attempt(PROBE, PROBE_DOI, browser, "environment-check")
             except BrowserFailure:
-                self.emit(kind="log", text=f"{browser.name} 的 PDF 检测未通过，正在尝试其他已安装浏览器。")
+                self.emit(kind="log", text=f"{browser_name(browser)} 的 PDF 检测未通过。")
                 continue
             self.selected = browser
             self._save(True)
-            self.emit(kind="log", text=f"PDF 环境检测通过：{browser.name}。")
+            version = self.versions.get(str(browser)) or "版本未知"
+            self.emit(kind="log", text=f"PDF 环境检测通过：{browser_name(browser)} · {version}。")
+            self.emit(kind="log", text=f"PDF 浏览器位置：{browser}")
             return
-        self._save(False)
         reason = "未找到 Edge / Chrome。" if not choices else "已安装浏览器均未通过离线 PDF 检测。"
-        raise ActionRequired(reason + f"已停止 PDF 任务，现有 XML 已保留。诊断文件：{self.report}")
+        if self.selection and choices:
+            reason = f"指定的 {browser_name(choices[0])} 未通过离线 PDF 检测。"
+        self._save(False, reason)
+        raise ActionRequired(reason + "可在「合成 PDF」中重新选择浏览器；也可选择「仅 XML」继续下载。"
+                             + f"现有 XML 已保留。诊断文件：{self.report}")
 
     def render(self, document, doi):
         self.ensure_ready()
@@ -202,7 +190,7 @@ class BrowserRenderer:
             except BrowserFailure:
                 continue
             if browser != self.selected:
-                self.emit(kind="log", text=f"已切换到 {browser.name}，PDF 合成成功。")
+                self.emit(kind="log", text=f"已切换到 {browser_name(browser)}，PDF 合成成功。")
             self.selected = browser
             self._save(True)
             return data
@@ -213,7 +201,7 @@ class BrowserRenderer:
         raise ValueError(f"本篇 PDF 未通过校验，浏览器环境正常，XML 已保留。诊断文件：{self.report}")
 
 
-def diagnose(report, control=None, emit=lambda **event: None):
-    renderer = BrowserRenderer(report, control, emit)
+def diagnose(report, control=None, emit=lambda **event: None, browser=""):
+    renderer = BrowserRenderer(report, control, emit, browser)
     renderer.ensure_ready()
     return renderer.report

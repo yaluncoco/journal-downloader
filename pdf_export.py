@@ -30,6 +30,7 @@ class PdfConfig:
     end_year: int = 2100
     layout: str = "double"
     output: Path | None = None
+    browser: str = ""
 
     def validate(self):
         if not self.source.is_dir():
@@ -72,7 +73,7 @@ class PdfExporter:
         self.output = (cfg.output or library / "fulltext_pdf").resolve()
         self.state = state_dir(self.output)
         self.cache = self.state / "image-cache"
-        self.renderer = BrowserRenderer(self.state / "pdf-diagnostics.json", self.control, emit)
+        self.renderer = BrowserRenderer(self.state / "pdf-diagnostics.json", self.control, emit, cfg.browser)
 
     def count(self, total, saved, reused, stage):
         self.emit(kind="counts", total=total, saved=saved, reused=reused,

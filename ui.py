@@ -350,7 +350,7 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
             selected_color="#D3EEEE", selected_hover_color="#BFE4E5", unselected_color="#F0F4F7",
             unselected_hover_color="#E0E9EF", text_color=INK, font=self.small_font,
             dynamic_resizing=False)).grid(row=1, column=0, sticky="ew", padx=16)
-        self.label(card, "选择 PDF 后逐篇合成。仅 PDF 模式会在\n校验成功后移除该篇 XML，失败时保留。",
+        self.label(card, "合成 PDF 支持 Edge / Chrome；下载 XML\n无需浏览器。仅 PDF 校验成功后移除 XML。",
             font=self.small_font, color=MUTED, justify="left", wraplength=252).grid(row=2, column=0, sticky="w", padx=18, pady=(7, 15))
         self.label(card, "题名关键词（可留空）", font=self.small_font, color=INK).grid(row=3, column=0, sticky="w", padx=18, pady=(0, 6))
         self.entry(card, self.title_filter, placeholder_text="如 forest, deep learning", width=240).grid(row=4, column=0, sticky="ew", padx=16)
@@ -372,7 +372,7 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         self.pdf_window = win
         win.title("合成阅读版 PDF")
         win.transient(self)
-        fit_window(win, (610, 480))
+        fit_window(win, (610, 580))
         win.grid_columnconfigure(0, weight=1)
         body = scroll_body(win)
         wrap_to(self.label(body, "把 XML 变成可阅读的论文", font=ctk.CTkFont(FONT, 22, weight="bold")), padding=12).grid(row=0, column=0, sticky="w", padx=6, pady=(12, 7))
@@ -402,6 +402,7 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
             height=40, corner_radius=10, border_width=4, fg_color="#F0F4F7",
             selected_color="#D3EEEE", selected_hover_color="#BFE4E5", unselected_color="#F0F4F7",
             unselected_hover_color="#E0E9EF", text_color=INK, font=self.body_font).grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 20))
+        self._browser_controls(card, win).grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 18))
         wrap_to(self.label(body, "使用主界面的 API Key 与网络设置；完整 PDF 会校验后跳过。\n输出到文库的 fulltext_pdf 文件夹。需要已安装 Edge 或 Chrome。\n生成的是 XML 重排阅读版，分页和细节可能与官方 PDF 不同。", font=self.small_font,
                    color=MUTED, justify="left"), padding=12).grid(row=3, column=0, sticky="w", padx=6)
         actions = ctk.CTkFrame(win, fg_color="transparent")
@@ -411,6 +412,23 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         ctk.CTkButton(actions, text="开始合成", height=44, width=140, corner_radius=12,
             fg_color=TEAL, hover_color=TEAL_HOVER, font=self.bold_font,
             command=lambda: self.start_pdf(folder_var.get(), "double" if layout_var.get() == "期刊双栏" else "single")).grid(row=0, column=1, sticky="e")
+
+    def _browser_controls(self, parent, window):
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame.grid_columnconfigure(0, weight=1)
+        self.label(frame, "PDF 浏览器", font=self.small_font, color=INK).grid(row=0, column=0, sticky="w")
+        wrap_to(self.label(frame, "", textvariable=self.pdf_browser_caption, font=self.small_font,
+                           color=MUTED, justify="left"), frame, padding=8).grid(row=1, column=0, sticky="ew", pady=(5, 8))
+        actions = ctk.CTkFrame(frame, fg_color="transparent")
+        actions.grid(row=2, column=0, sticky="w")
+        choose = self.secondary(actions, "选择程序…", lambda: self._choose_pdf_browser(window), width=105)
+        choose.grid(row=0, column=0, padx=(0, 8))
+        auto = self.secondary(actions, "自动检测", lambda: self._set_pdf_browser(""), width=90)
+        auto.grid(row=0, column=1)
+        if self.worker and self.worker.is_alive():
+            choose.configure(state="disabled")
+            auto.configure(state="disabled")
+        return frame
 
     def year_control(self, parent, variable):
         frame = ctk.CTkFrame(parent, fg_color="#F7F9FB", corner_radius=10, border_width=1, border_color=LINE)
@@ -454,7 +472,7 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         self.advanced_window = win
         win.title("高级设置")
         win.transient(self)
-        fit_window(win, (540, 420))
+        fit_window(win, (540, 520))
         body = scroll_body(win)
         self.label(body, "高级设置", font=ctk.CTkFont(FONT, 22, weight="bold")).grid(row=0, column=0, sticky="w", padx=6, pady=(12, 12))
         row = 1
@@ -480,4 +498,5 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI):
         entry.grid(row=5, column=0, sticky="w", padx=6)
         if self.worker and self.worker.is_alive():
             entry.configure(state="disabled")
+        self._browser_controls(body, win).grid(row=6, column=0, sticky="ew", padx=6, pady=(18, 10))
         self.secondary(win, "完成", win.destroy, width=100).grid(row=1, column=0, sticky="e", padx=28, pady=(4, 16))

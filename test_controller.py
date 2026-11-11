@@ -23,7 +23,8 @@ class ControllerTests(unittest.TestCase):
         self.addCleanup(state.stop)
 
     def quiet_app(self):
-        app = App(check_updates=False, remember_credentials=False, scan_libraries=False)
+        app = App(check_updates=False, remember_credentials=False, scan_libraries=False,
+                  settings={}, visible=False)
         app.withdraw()
         def cleanup():
             app._cancel_update_notice()
@@ -65,6 +66,7 @@ class ControllerTests(unittest.TestCase):
         folder = app.output.get()
         app._pdf_dialog()
         app.pdf_window.withdraw()
+        app.pdf_browser.set("C:/Synthetic Edge/msedge.exe")
         with tempfile.TemporaryDirectory() as tmp:
             report = str(Path(tmp) / "diagnostic.json")
             with patch("controller.filedialog.asksaveasfilename", return_value=report), \
@@ -74,6 +76,7 @@ class ControllerTests(unittest.TestCase):
                 app._poll()
                 diagnose.assert_called_once()
                 self.assertEqual(diagnose.call_args.args[0], report)
+                self.assertEqual(diagnose.call_args.kwargs["browser"], app.pdf_browser.get())
             self.assertEqual(app.status.get(), "PDF 环境检测通过")
             self.assertIn(report, app.detail.get())
             self.assertEqual(app.output.get(), folder)
@@ -192,11 +195,29 @@ class ControllerTests(unittest.TestCase):
         app = self.quiet_app()
         with tempfile.TemporaryDirectory() as temp, patch.object(controller, 'SETTINGS_DIR', Path(temp)):
             cfg = Config('SYNTHETIC_PRIVATE', PRESETS[0].url, 2024, 2024, Path(temp),
-                         output_mode='pdf', title_filter='forest, deep learning', filter_mode='all')
+                         output_mode='pdf', title_filter='forest, deep learning', filter_mode='all',
+                         pdf_browser='C:/Custom Edge/msedge.exe')
             app._save_settings(cfg)
             saved = json.loads((Path(temp) / 'settings.json').read_text(encoding='utf-8'))
             self.assertEqual((saved['output_mode'], saved['filter_mode'], saved['title_filter']), ('pdf', 'all', 'forest, deep learning'))
             self.assertNotIn('SYNTHETIC_PRIVATE', str(saved))
+            self.assertEqual(saved['pdf_browser'], cfg.pdf_browser)
+
+    def test_browser_picker_persists_without_credentials_and_reset_restores_auto(self):
+        app = self.quiet_app()
+        with tempfile.TemporaryDirectory() as temp, patch.object(controller, 'SETTINGS_DIR', Path(temp)):
+            path = Path(temp) / 'msedge.exe'
+            path.touch()
+            with patch('controller.filedialog.askopenfilename', return_value=str(path)):
+                app._choose_pdf_browser(app)
+            self.assertEqual(app.pdf_browser.get(), str(path.resolve()))
+            self.assertIn('Microsoft Edge', app.pdf_browser_caption.get())
+            saved = json.loads((Path(temp) / 'settings.json').read_text(encoding='utf-8'))
+            self.assertEqual(saved['pdf_browser'], str(path.resolve()))
+            self.assertNotIn('api_key', saved)
+            app._set_pdf_browser('')
+            self.assertIn('自动检测', app.pdf_browser_caption.get())
+            self.assertEqual(json.loads((Path(temp) / 'settings.json').read_text(encoding='utf-8'))['pdf_browser'], '')
 
     def test_key_persists_across_restart_and_opt_out_removes_it(self):
         from credential_store import load_key, key_file
