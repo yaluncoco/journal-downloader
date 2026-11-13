@@ -10,11 +10,14 @@ import credential_store as credentials
 import library_store as storage
 from engine import (ActionRequired, Config, Downloader, PRESETS, library_lock,
                     load_json, paths_for, save_json, save_lines, verify_saved)
-from smoke_test import xml
+from smoke_test import xml, offline_search_page
 
 
 class StorageTests(unittest.TestCase):
     def setUp(self):
+        search = patch('article_search.request_page', side_effect=offline_search_page)
+        search.start()
+        self.addCleanup(search.stop)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
@@ -24,7 +27,7 @@ class StorageTests(unittest.TestCase):
         self.library = self.root / PRESETS[0].issn
         self.library.mkdir()
 
-    def test_migration_keeps_only_papers_and_resumes_without_network(self):
+    def test_migration_keeps_only_papers_and_skips_fulltext_after_list_update(self):
         row = {"doi": "10.1016/j.demo.2024.old", "year": 2024, "date": "2024", "title": "Example"}
         target, txt, _ = paths_for(self.library, row)
         target.parent.mkdir(parents=True)
@@ -57,7 +60,7 @@ class StorageTests(unittest.TestCase):
         self.assertEqual((storage.state_dir(pdf.parent.parent) / "image-cache/article/picture.image").read_bytes(), b"original cached image")
         cfg = Config("TEST_KEY", PRESETS[0].url, 2024, 2024, self.library)
         resumed = Downloader(cfg)
-        resumed.public_json = resumed.fetch = lambda *a: self.fail("Migrated library must resume offline")
+        resumed.public_json = resumed.fetch = lambda *a: self.fail("Migrated XML must skip fulltext requests")
         resumed.run()
         self.assertEqual((resumed.reused, resumed.new_count), (1, 0))
         self.assertEqual(resumed.base, self.library)

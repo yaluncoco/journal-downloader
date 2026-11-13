@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 import urllib.error
@@ -97,11 +98,9 @@ class ArticleSearchTests(unittest.TestCase):
         self.assertEqual([json.loads(r.data)['display']['offset'] for r in self.runner.opener.requests], [0, 100])
         self.assertGreaterEqual(self.runner.control.wait.call_args.args[0], 1)
 
-    def test_cache_separates_scope_query_sort_and_years(self):
+    def test_cache_separates_scope_query_sort_and_years_but_never_prevents_update(self):
         self.runner.opener = Opener([response([entry()])])
         first = collect_search(self.runner)
-        self.assertEqual(collect_search(self.runner), first)
-        self.assertEqual(len(self.runner.opener.requests), 1)
         original = cache_path(self.runner.state, first['spec'])
         for scope, sort, query, end in [('title', 'relevance', self.cfg.title_filter, 2024),
                                        ('fulltext', 'date', self.cfg.title_filter, 2024),
@@ -109,9 +108,9 @@ class ArticleSearchTests(unittest.TestCase):
                                        ('fulltext', 'relevance', self.cfg.title_filter, 2025)]:
             other = search_spec(PRESETS[0], 2024, end, query, 'native', scope, sort)
             self.assertNotEqual(cache_path(self.runner.state, other), original)
-        self.cfg.refresh = True
         self.runner.opener = Opener([response([])])
         self.assertEqual(collect_search(self.runner)['records'], [])
+        self.assertEqual(len(self.runner.opener.requests), 1)
 
     def test_wrong_journal_year_and_missing_doi_are_reported(self):
         self.runner.opener = Opener([response([entry(1), entry(2, sourceTitle='Remote Sensing Letters'),
@@ -160,7 +159,6 @@ class ArticleSearchTests(unittest.TestCase):
         repaired = collect_search(self.runner)
         self.assertTrue(repaired['complete'])
         self.assertEqual(len(repaired['records']), 103)
-        self.assertEqual(collect_search(self.runner), repaired)  # Complete cache needs no request.
         self.assertEqual(len(self.runner.opener.requests), 1)
 
     def test_partial_query_can_download_and_resume_without_duplicate_fulltexts(self):
@@ -225,13 +223,13 @@ class ArticleSearchTests(unittest.TestCase):
         self.runner.opener = Opener([response([entry(999)])])
         self.assertEqual(len(collect_search(self.runner)['records']), 1)
 
-    def test_refresh_does_not_reuse_partial_checkpoint(self):
+    def test_automatic_update_keeps_checkpoint_and_recovers_missing_hit(self):
         self.runner.opener = Opener([response([entry(1), entry(1)], 2), response([entry(1), entry(1)], 2)])
         self.assertFalse(collect_search(self.runner)['complete'])
-        self.cfg.refresh = True
-        self.runner.opener = Opener([response([entry(2)])])
+        self.runner.opener = Opener([response([entry(2)], 2)])
         result = collect_search(self.runner)
-        self.assertEqual([r['doi'] for r in result['records']], [entry(2)['doi']])
+        self.assertTrue(result['complete'])
+        self.assertEqual([r['doi'] for r in result['records']], [entry(1)['doi'], entry(2)['doi']])
 
     def test_recovery_authentication_failure_still_stops_and_keeps_checkpoint(self):
         self.runner.opener = Opener([response([entry(1), entry(1)], 2),
@@ -288,19 +286,85 @@ class ArticleSearchTests(unittest.TestCase):
         self.runner.fetch = fetch
         self.runner.run()
         again = Downloader(self.cfg)
-        again.opener = Opener([])  # Cached query and checked local XML must suffice.
+        again.opener = Opener([response([entry(3), entry(1), entry(2)])])
         again.fetch = fetch
         again.run()
         self.assertEqual(fetched, [entry(3)['doi'], entry(1)['doi']])
         self.assertEqual(again.reused, 1)
+        self.assertEqual(len(again.opener.requests), 1)  # List updates; full texts resume.
 
-    def test_empty_query_reuses_full_index_without_search_requests(self):
+    def test_empty_query_updates_from_official_catalog_instead_of_legacy_index(self):
+        from journal_articles import ENDPOINT as CATALOG_ENDPOINT
         self.cfg.title_filter = ''
         cached_index(self.runner.base, [{'doi': '10.1016/j.old', 'year': 2024, 'date': '2024', 'title': 'Old'}])
-        self.runner.opener = Opener([])
+        self.runner.opener = Opener([Response(json.dumps({'search-results': {
+            'opensearch:totalResults': '1', 'opensearch:startIndex': '0', 'entry': [
+            {'prism:doi': entry()['doi'], 'dc:title': 'New official title', 'prism:coverDate': '2024-01-01',
+             'prism:publicationName': PRESETS[0].name, 'prism:issn': '00344257', 'pii': 'S0034-4257(24)00001-0'}]}}).encode())])
         result = self.runner.preview()
-        self.assertEqual(len(result['records']), 1)
-        self.assertEqual(self.runner.opener.requests, [])
+        self.assertEqual(result['records'][0]['title'], 'New official title')
+        request = self.runner.opener.requests[0]
+        self.assertEqual(request.get_method(), 'GET')
+        self.assertTrue(request.full_url.startswith(CATALOG_ENDPOINT + '?'))
+        params = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)
+        self.assertEqual(params['query'], ['issn(00344257) AND pub-date AFT 20231231 AND pub-date BEF 20250101'])
+        self.assertNotIn(self.cfg.api_key, request.full_url)
+        self.assertEqual(result['records'][0]['pii'], 'S0034425724000010')
+
+    def test_preview_handoff_reuses_only_same_recent_complete_snapshot_once(self):
+        self.runner.opener = Opener([response([entry()])])
+        preview = self.runner.preview()
+        again = Downloader(self.cfg, search_snapshot=preview['snapshot'])
+        again.opener = Opener([])
+        again.fetch = Mock(return_value=(xml(entry()['doi']), {'http': 200}))
+        again.run()
+        self.assertEqual(again.new_count, 1)
+        self.assertEqual(again.opener.requests, [])
+        self.assertIsNone(again.search_snapshot)
+        again.opener = Opener([response([entry(2)])])
+        again.select_records()
+        self.assertEqual(again.records[0]['doi'], entry(2)['doi'])
+
+    def test_expired_changed_folder_or_changed_query_preview_is_refetched(self):
+        self.runner.opener = Opener([response([entry()])])
+        snapshot = self.runner.preview()['snapshot']
+        for changed in ({**snapshot, 'checked_at': time.monotonic()-601},
+                        {**snapshot, 'state': 'another-library'},
+                        {**snapshot, 'result': {**snapshot['result'], 'spec': {}}},
+                        {**snapshot, 'result': {**snapshot['result'], 'complete': False}}):
+            with self.subTest(changed=changed.keys()):
+                self.runner.search_snapshot = changed
+                self.runner.opener = Opener([response([entry(2)])])
+                self.assertEqual(collect_search(self.runner)['records'][0]['doi'], entry(2)['doi'])
+                self.assertEqual(len(self.runner.opener.requests), 1)
+
+    def test_failed_auto_update_does_not_download_stale_cached_list(self):
+        self.runner.opener = Opener([response([entry()])])
+        self.runner.preview()
+        self.runner.opener = Opener([urllib.error.HTTPError(ENDPOINT, 403, 'test', {}, None)])
+        self.runner.fetch = Mock(side_effect=AssertionError('stale fulltext download'))
+        with self.assertRaises(ActionRequired):
+            self.runner.run()
+        self.runner.fetch.assert_not_called()
+
+    def test_catalog_zero_results_and_malformed_response_are_distinct(self):
+        from journal_articles import catalog_response
+        body = {'display': {'offset': 0}}
+        zero = {'search-results': {'opensearch:totalResults': '0', 'opensearch:startIndex': '0',
+                                  'entry': [{'error': 'Result set was empty'}]}}
+        self.assertEqual(catalog_response(zero, body), {'resultsFound': 0, 'results': []})
+        for data in ({}, {'service-error': {}}, {'search-results': {**zero['search-results'], 'opensearch:totalResults': '1'}},
+                     {'search-results': {**zero['search-results'], 'opensearch:startIndex': '100'}}):
+            with self.subTest(data=data), self.assertRaises(ActionRequired):
+                catalog_response(data, body)
+
+    def test_blank_keywords_have_one_catalog_cache_regardless_of_keyword_controls(self):
+        first = search_spec(PRESETS[0], 2024, 2027, '', 'native', 'fulltext', 'relevance')
+        self.assertEqual(first, search_spec(PRESETS[0], 2024, 2027, '', 'all', 'title', 'date'))
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(website_url(PRESETS[0], 2024, 2027, '', 'native', 'fulltext', 'date')).query)
+        self.assertNotIn('issn', query)
+        self.assertNotIn('qs', query)
+        self.assertEqual(query['pub'], [PRESETS[0].name])
 
 
 if __name__ == '__main__':

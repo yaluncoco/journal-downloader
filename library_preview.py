@@ -3,9 +3,9 @@ from pathlib import Path
 import threading
 import time
 
-from engine import Cancelled, Journal, library_path, local_journal, parse_journal_url, valid_issn, load_json
-from article_filter import filter_records, OUTPUT_MODES, FILTER_MODES
-from article_search import SCOPES, SORTS, validate_search, uses_api, search_spec, cached_search
+from engine import Cancelled, Journal, library_path, local_journal, parse_journal_url, valid_issn
+from article_filter import OUTPUT_MODES, FILTER_MODES
+from article_search import SCOPES, SORTS, validate_search, search_spec, cached_search
 from pdf_official import METHODS
 
 
@@ -126,30 +126,18 @@ class LibraryPreview:
                 total = None
                 listed_saved = 0
                 candidate_total = None
-                if uses_api(search_scope, query):
-                    spec = search_spec(target, start, end, query, filter_mode, search_scope, search_sort)
-                    cache = cached_search(state_dir(base), spec)
-                    if cache:
-                        rows = cache["records"]
-                        candidate_total = cache["results_found"]
-                        dois = {row["doi"].lower() for row in rows}
-                        total, listed_saved = len(dois), len(dois.intersection(complete))
-                else:
-                    cache = load_json(state_dir(base) / "indexes" / f"{start}-{end}.json", {})
-                    if not cache:
-                        cache = load_json(base / "indexes" / f"{start}-{end}.json", {})
-                if (not uses_api(search_scope, query) and isinstance(cache, dict) and cache.get("complete") is True and cache.get("issn") == (target or journal).issn
-                        and cache.get("years") == [start, end] and isinstance(cache.get("records"), list)):
+                spec = search_spec(target, start, end, query, filter_mode, search_scope, search_sort)
+                cache = cached_search(state_dir(base), spec)
+                if cache:
                     rows = cache["records"]
-                    if all(isinstance(row, dict) and isinstance(row.get("doi"), str) for row in rows):
-                        candidate_total = len(rows)
-                        dois = {row["doi"].lower() for row in (filter_records(rows, query, filter_mode) if query.strip() else rows)}
-                        total = len(dois)
-                        listed_saved = len(dois.intersection(complete))
+                    candidate_total = cache["results_found"]
+                    dois = {row["doi"].lower() for row in rows}
+                    total, listed_saved = len(dois), len(dois.intersection(complete))
                 checkpoint()
                 events.put({"kind": "library_preview", "generation": generation, "inventory": inventory,
                                  "total": total, "listed_saved": listed_saved,
                                  "local_complete": len(complete), "candidate_total": candidate_total,
+                                 "listed_at": cache["created_at"] if cache else "",
                                  "pdf_saved": len(compatible), "pdf_total": len(xml_dois | pdf_dois | pdfs["invalid_dois"])
                                      + max(0, pdfs["invalid"] - len(pdfs["invalid_dois"])) + pdfs["unverified"],
                                  "pdf_invalid": pdfs["invalid"], "pdf_unverified": pdfs["unverified"],
@@ -197,9 +185,9 @@ class LibraryPreview:
         self.progress.set(event["listed_saved"] / max(1, total) if total is not None else 0)
         self.percent.set(f"{event['listed_saved'] / total:.0%}" if total else "本地已读取")
         self.status.set("可继续下载" if count else "准备就绪")
-        self.detail.set("开始后按输出方式校验并续传；缺失或损坏的文件会继续处理。" +
-                        (f"检索条件匹配 {total}/{event['candidate_total']} 条。" if self.title_filter.get().strip() and total is not None else
-                         "点击「预览」获取此条件的结果。" if self.title_filter.get().strip() else ""))
+        self.detail.set("开始后自动更新官方列表，校验并续传。" +
+                        (f"当前显示上次列表：{total} 条（{event.get('listed_at', '')}）。" if total is not None else
+                         "点击「预览」可先查看论文列表。"))
         saved, expected = event.get("pdf_saved", 0), event.get("pdf_total", count)
         self.pdf_progress.stop()
         self.pdf_progress.configure(mode="determinate", progress_color="#24976C" if expected and saved == expected else "#087F8C")

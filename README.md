@@ -4,25 +4,9 @@
 
 常用入口保留 **Remote Sensing of Environment（RSE）** 与 **ISPRS Journal of Photogrammetry and Remote Sensing**。点击「检索全部期刊」可按英文名称、关键词或 ISSN 搜索内置目录，也支持粘贴期刊地址。
 
-**v1.8.1** 修复 ScienceDirect 跨页重复导致检索停止：按 PII / DOI 自动去重，分页位置仍按接口原始返回条数推进。缺项时保持相同查询条件，有限次交替排序补查；保留首次出现顺序，补回条目追加在末尾。每页保存检索进度，仍有缺口时明确提示并允许先下载已确认匹配的论文，不把部分列表缓存成完整结果。2026-11-13 实测 Ecological Indicators、2026–2027 年、全文 `tree`，从第一轮 609/612 条自动补齐至 612/612 条，共 10 个分页请求。
+**v1.9.0** 精简目录与检索流程：预览或开始时默认从 Elsevier 官方接口更新论文列表。关键词留空按 ISSN、发表年份获取整个期刊目录；有关键词使用 ScienceDirect 全文或题名检索。删除手动刷新、旧的本地题名筛选和重复的浏览器 / 范围设置。刚预览的完整列表可在 10 分钟内直接用于一次下载，避免重复请求。
 
-**v1.8.0** 排查 TLS 漏检与浏览器依赖：2026-11-11 实测 RSE、2020–2027 年、TLS，官网与 API 均为题名 1 篇、全文 113 篇。预览现在明确显示检索范围，题名模式可一键改为全文重新预览；官网入口使用未加引号的刊名和 ISSN 精确限定。默认 PDF 流程先校验官方原版，不可用时通过内置 ReportLab / MathML 排版生成单栏阅读版，不启动浏览器。只有手动选择浏览器排版才调用 Edge / Chrome。官方 PDF 必须与 XML 中的全文页数一致；HTTP 200 的第一页预览不会当作完整全文。
-
-**v1.7.0** 接入 ScienceDirect Search V2：论文关键词可检索全部内容（不含参考文献）或仅题名，支持大写 AND / OR / NOT、双引号词组、括号组合及相关度 / 最新发表排序。提供分页预览和官网核对入口；相同条件复用缓存，查询变更不会覆盖完整文库索引。旧版已保存的题名筛选仍按原方式执行，可手动切换到 API 检索。
-
-**v1.6.5** 修复浏览器启动进程返回 0 后，PDF 尚未写好就判定失败并清理临时目录的时序问题。现在会等待延迟输出及文件稳定，再校验 PDF 内容；无输出仍在限定时间后停止。诊断增加启动时序、运行权限、浏览器文件日志和相关已配置策略，检测到 `UserDataDir` 策略覆盖独立目录时停止该浏览器候选，避免使用已有浏览器会话。
-
-**v1.6.4** 补强 Edge 安装位置识别，自动模式优先使用 Microsoft Edge；合成 PDF 和高级设置中可手动指定 `msedge.exe` 或 `chrome.exe`，本机记忆并供下载时合成、单独合成及环境检测共用。日志显示实际浏览器、版本和位置。XML 下载不依赖浏览器，不需要安装 Chrome。
-
-**v1.6.3** 优化启动、连续缩放与大文库响应：控件改用无需私有字体的 Canvas 绘制，避免滚动条和下拉框重绘时反复刷新整窗；准备好首次布局后再显示。目录预览只保留一个扫描线程，未变化文件在本次运行中复用校验结果，下载续传仍重新校验。期刊结果卡片复用并分批更新，运行日志批量写入，界面事件分时处理。
-
-**v1.6.2** 修复深层临时目录下 PDF 检测失败却无法导出报告的问题：自动选择较短、可写的工作目录，诊断补充浏览器版本、实际工作路径和失败退出码；测试页通过不会覆盖论文合成失败的结果。
-
-**v1.6.1** 修复跨电脑 PDF 启动兼容与旧文库续传：打印前离线检测 Edge/Chrome，自动尝试可用浏览器；故障时保留退出码及诊断记录。下载与合成同时识别文库年份目录和 `fulltext_xml`，支持勘误的 `simple-article` 结构。在「合成 PDF」中点击「检测 PDF 环境」可导出诊断文件，无需 Key 或联网。
-
-**v1.6.0** 改为 Windows 安装版，更新通过安装向导完成。窗口按可用屏幕与 DPI 调整大小，窄窗口改为上下排列，检索和弹窗随窗口换行。首次从旧便携版迁移，请关闭旧程序并手动运行安装包一次；后续从开始菜单启动。
-
-v1.5.0 新增逐篇 XML→PDF、仅 PDF 输出、下载前题名词组筛选、当前目录 PDF 完整性统计，以及官方学科与 2025 中科院参考分区筛选。数据来源及 GitHub 示例参考见 [DATA_SOURCES.md](DATA_SOURCES.md)。
+重复分页自动合并并有限次补查；每页保存未完成进度，仍有缺口时明确提示，可先下载已确认匹配的论文。再次开始自动补查，已有完整 XML / PDF 校验后跳过。
 
 ## 下载与使用
 
@@ -57,8 +41,8 @@ https://www.sciencedirect.com/search?pub=Remote+Sensing+of+Environment&date=2024
 - 检索统一 Computer/Computers、and/&；正式刊名和顺序前缀优先，具体输入 `computer and electronic` 可将目标期刊排首位。
 - 下载时可逐篇合成 PDF；默认保留 XML，明确选择「仅 PDF」才会在该篇 PDF 校验后移除 XML。合成失败保留 XML，下次复用并重试。
 - 论文检索直接使用 ScienceDirect Search V2 PUT 接口；官网语法如 `(forest OR crop) AND "deep learning" NOT urban`。也可在「设置」中选任一 / 全部词组，由软件生成 OR / AND 表达式。按期刊精确词组查询并校验返回刊名，避免混入相似期刊。
-- 点「预览」只取元数据，结果按 25 条分页；按 API 返回顺序下载，数量限制与续传沿用此顺序。输入时不联网，API 每页最多 100 条、默认间隔 3 秒；相同查询复用已完成缓存。「更新论文列表」强制刷新。超过 6,000 条要求缩小范围，不静默截断。
-- 搜索接口需相应 Key / 机构授权；401/403 不解释为零结果，也不自动降级。可手动选「本地题名筛选」，继续使用 Crossref 题名的任一 / 全部词组匹配。关键词留空时沿用完整候选列表流程，不调用搜索 API。
+- 点「预览」只取元数据，结果按 25 条分页；按 API 返回顺序下载，数量限制与续传沿用此顺序。输入时不联网，API 每页最多 100 条、默认间隔 3 秒；每次预览或开始自动更新；仅刚预览的完整列表可在 10 分钟内直接用于一次下载。缓存供本地统计，不代替下次更新。超过 6,000 条要求缩小范围，不静默截断。
+- 关键词留空时通过 Elsevier Article Metadata API 按 ISSN 和发表年份获取期刊目录，最新发表优先。列表和全文均需相应授权；401/403 不解释为零结果，不使用旧列表掩盖失败。旧本地题名设置迁移到官方题名检索，关键词保留。
 - 切换目录时立即清除旧 PDF 状态，按所选目录与年份重新检查 PDF 实际内容、哈希和 DOI。
 - 打开软件、切换保存位置或年份时，后台读取已有 XML 并显示完整数量；选择具体文库、`fulltext_xml` 或年份文件夹可识别原文库。点击开始后继续下载缺少的论文。
 - 按 DOI 识别改过文件名的完整 XML；下载前重新检查完整性，避免重复下载。
@@ -81,11 +65,11 @@ https://www.sciencedirect.com/search?pub=Remote+Sensing+of+Environment&date=2024
 
 ## 范围说明
 
-论文列表来自 Crossref 公共元数据，是候选列表，不保证与 ScienceDirect 的全部卷期条目一一对应，也可能包含勘误、编委会等记录。未来年份只能获取已经登记、已经发布且有权限的内容。
+论文目录与关键词结果来自 Elsevier 官方 API，可能包含勘误、编委会等记录。软件校验返回期刊、发表年份和 DOI，缺少有效 DOI 的条目单独计数。未来年份只能获取目前已登记、已发布的条目；接口索引与网页更新时间可能不同。Crossref 仅用于识别内置目录中没有的自定义期刊，不再用于获取论文列表。
 
 全文由 Elsevier Article Retrieval API 提供，插图由 Object Retrieval API 提供。API Key、机构订阅及网络出口决定实际可访问范围。本程序不绕过访问控制。
 
-PDF 是依据 XML 和图片重新排版的阅读版，标有来源说明；不是出版社官方 PDF，不能保证相同字体、分页或图表位置。rawtext / 仅摘要 XML 不会被标为完整图文 PDF，需保留为待处理；补充附件不嵌入 PDF。
+PDF 默认优先下载并校验官方原版；官方全文不可用时，依据 XML 和图片重新排版为带来源说明的阅读版，字体、分页和图表位置可能与原版不同。rawtext / 仅摘要 XML 不会被标为完整图文 PDF，需保留为待处理；补充附件不嵌入 PDF。
 
 IEEE 接口目前处于验证阶段，尚未启用下载入口。测试账号仍待审批，首次请求返回 `403 Developer Inactive`；格式与权限说明见 [IEEE 接口核对](IEEE接口说明.md)。
 
@@ -106,12 +90,12 @@ python -m venv .build-env
 .\build.ps1 -ISCC "C:\Program Files\Inno Setup 7\ISCC.exe"
 ```
 
-安装器编译需安装官方 Inno Setup 7。产物为 `release/v1.8.1/JournalDownloader-Setup.exe`；应用目录为 `release/v1.8.1/JournalDownloader/`。XML 下载引擎使用 Python 标准库；界面使用 CustomTkinter，图片校验使用 Pillow，PDF 校验使用 pypdf，使用 PyInstaller 打包。内置排版的依赖及字体随安装包分发；可选的浏览器不随程序分发。
+安装器编译需安装官方 Inno Setup 7。产物为 `release/v1.9.0/JournalDownloader-Setup.exe`；应用目录为 `release/v1.9.0/JournalDownloader/`。XML 下载引擎使用 Python 标准库；界面使用 CustomTkinter，图片校验使用 Pillow，PDF 校验使用 pypdf，使用 PyInstaller 打包。内置排版的依赖及字体随安装包分发；可选的浏览器不随程序分发。
 
 打包后离线自检：
 
 ```powershell
-.\release\v1.8.1\JournalDownloader\JournalDownloader.exe --self-test "$env:TEMP\journal-downloader-test.json"
+.\release\v1.9.0\JournalDownloader\JournalDownloader.exe --self-test "$env:TEMP\journal-downloader-test.json"
 ```
 
 加入 `--online` 可额外验证两个期刊的在线元数据查询，不需要真实 API Key。
@@ -120,7 +104,7 @@ python -m venv .build-env
 无网络批量合成（要求图片已缓存；API Key 不通过命令行传递）：
 
 ```powershell
-.\release\v1.8.1\JournalDownloader\JournalDownloader.exe --pdf-export "D:\文库\fulltext_xml" "D:\文库\fulltext_pdf"
+.\release\v1.9.0\JournalDownloader\JournalDownloader.exe --pdf-export "D:\文库\fulltext_xml" "D:\文库\fulltext_pdf"
 ```
 
 结果保存在本机应用数据中的 `offline_export_result.json`，输出目录只放 PDF；默认使用内置单栏排版。首次获取图片请使用界面输入 Key。
@@ -142,8 +126,8 @@ python -m venv .build-env
 | `credential_store.py` | Windows DPAPI 加密 Key 记忆与清除 |
 | `library_inventory.py` | 本地 XML 扫描、文库识别与按 DOI 续传 |
 | `library_preview.py`、`pdf_inventory.py` | 后台目录状态预览、PDF 完整性扫描 |
-| `article_filter.py`、`download_output.py` | 题名筛选、逐篇输出与 PDF 完成后清理 |
-| `article_search.py`、`article_search_ui.py` | ScienceDirect API 查询、独立缓存、检索设置及分页预览 |
+| `article_filter.py`、`download_output.py` | 词组输入、逐篇输出与 PDF 完成后清理 |
+| `article_search.py`、`journal_articles.py`、`search_paging.py`、`article_search_ui.py` | 官方目录 / 检索、自动更新、重复分页恢复和预览 |
 | `journal_catalog.py`、`catalog_ui.py`、`journals.json` | 离线期刊检索与目录数据 |
 | `journal_metadata.py`、`journal_metadata.json`、`build_metadata.py` | 官方学科、2025 分区参考与可复现数据转换 |
 | `build_catalog.py` | 从官方 XLSX 清单构建目录快照 |

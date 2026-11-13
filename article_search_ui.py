@@ -15,15 +15,9 @@ class ArticleSearchUI:
         self._search_changed()
 
     def _search_changed(self, *_):
-        local = SCOPES[self.search_scope.get()] == "local"
-        if local and self.filter_mode.get() == "官网语法":
-            self.filter_mode.set("任一词组")
         scope = SCOPES[self.search_scope.get()]
         self.search_hint.set(scope_description(scope) + "\n" + self.filter_mode.get() +
-                             ("" if local else " · " + self.search_sort.get()))
-        if getattr(self, "search_window", None) and self.search_window.winfo_exists():
-            self.search_mode_menu.configure(values=[name for name in FILTER_MODES if not local or name != "官网语法"])
-            self.search_sort_menu.configure(state="disabled" if local else "normal")
+                             " · " + self.search_sort.get())
 
     def _search_dialog(self):
         from ui import ctk, BG, MUTED, INK
@@ -36,10 +30,10 @@ class ArticleSearchUI:
         win = self.search_window = ctk.CTkToplevel(self, fg_color=BG)
         win.title("论文检索设置")
         win.transient(self)
-        fit_window(win, (620, 620))
+        fit_window(win, (560, 480))
         win.grid_columnconfigure(0, weight=1)
         body = scroll_body(win)
-        self.label(body, "检索范围与语法", font=self.bold_font).grid(row=0, column=0, sticky="w", pady=(10, 14))
+        self.label(body, "关键词与排序", font=self.bold_font).grid(row=0, column=0, sticky="w", pady=(10, 14))
         def menu(row, label, variable, choices):
             self.label(body, label, font=self.small_font).grid(row=row, column=0, sticky="w", pady=(6, 4))
             widget = ctk.CTkOptionMenu(body, variable=variable, values=list(choices), height=36,
@@ -47,18 +41,14 @@ class ArticleSearchUI:
                 button_color="#DDE8EE", text_color=INK)
             widget.grid(row=row+1, column=0, sticky="ew", pady=(0, 8))
             return widget
-        menu(1, "检索范围", self.search_scope, SCOPES)
-        self.search_mode_menu = menu(3, "输入方式", self.filter_mode, FILTER_MODES)
-        self.search_sort_menu = menu(5, "API 结果顺序（达到下载数量后按此顺序续传）", self.search_sort, SORTS)
-        text = ('官网语法：直接交给 ScienceDirect 解释。\n'
+        menu(1, "关键词输入方式", self.filter_mode, FILTER_MODES)
+        menu(3, "关键词检索的结果顺序", self.search_sort, SORTS)
+        text = ('官网语法使用大写 AND / OR / NOT。\n'
                 '例：(forest OR crop) AND "deep learning" NOT urban\n'
-                'AND / OR / NOT 必须大写；双引号表示词组，括号控制组合。\n\n'
-                '任一 / 全部词组：输入 forest, deep learning，软件自动生成 OR / AND 检索式。\n\n'
-                '全文检索覆盖文章内容（不含参考文献）；题名检索只查标题。搜索权限与全文下载权限可能不同。\n'
-                '本地题名筛选不请求搜索 API，不检索摘要或正文。\n\n'
-                '留空时获取所选期刊全部候选列表。输入时不发送请求；点击预览或开始下载才检索。'
-                '相同条件复用缓存，勾选高级设置中的「更新论文列表」可刷新。')
-        wrap_to(self.label(body, text, font=self.small_font, color=MUTED, justify="left"), padding=14).grid(row=7, column=0, sticky="ew", pady=(10, 12))
+                '任一 / 全部词组用逗号分隔，例如 forest, deep learning。\n\n'
+                '留空时获取整个期刊目录，最新发表优先。\n'
+                '预览或开始时自动更新；刚预览过的完整列表可直接用于下载。')
+        wrap_to(self.label(body, text, font=self.small_font, color=MUTED, justify="left"), padding=14).grid(row=5, column=0, sticky="ew", pady=(10, 12))
         self.secondary(win, "完成", win.destroy, width=100).grid(row=1, column=0, sticky="e", padx=24, pady=14)
         self._search_changed()
 
@@ -73,13 +63,13 @@ class ArticleSearchUI:
             scope = SCOPES[self.search_scope.get()]
             mode, sort = FILTER_MODES[self.filter_mode.get()], SORTS[self.search_sort.get()]
             validate_search(self.title_filter.get(), mode, scope, sort)
-            url = website_url(journal, start, end, self.title_filter.get(), mode,
-                              "title" if scope == "local" else scope, sort)
+            url = website_url(journal, start, end, self.title_filter.get(), mode, scope, sort)
             webbrowser.open(url)
         except ValueError as error:
             messagebox.showerror("请检查检索设置", str(error), parent=self)
 
     def _show_search_results(self, result):
+        self.search_snapshot = result.get('snapshot')
         from ui import ctk, BG, MUTED, WHITE, INK
         from window_layout import fit_window, wrap_to
         if getattr(self, "search_results_window", None) and self.search_results_window.winfo_exists():
@@ -93,8 +83,8 @@ class ArticleSearchUI:
         rows = result["records"]
         title = f"{result['journal']} · {result['years'][0]}–{result['years'][1]}"
         wrap_to(self.label(win, title, font=self.bold_font, justify="left"), padding=40).grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 7))
-        source = "本地候选题名" if result["scope"] == "local" or not result["query"].strip() else "ScienceDirect API"
-        hint = f"{source} · {scope_description(result['scope'])}\n命中 {result['candidate_total']} 条，可处理 {len(rows)} 条 · 关键词：{result['query'] or '无'}"
+        source = "ScienceDirect 检索" if result['query'].strip() else "Elsevier 官方期刊目录"
+        hint = f"{source} · 已自动更新\n命中 {result['candidate_total']} 条，可处理 {len(rows)} 条 · 关键词：{result['query'] or '无'}"
         if result['scope'] != 'fulltext' and result['query'].strip():
             hint += "\n当前只查题名。TLS 等术语可能出现在正文，可切换全文重新预览。"
         else:
@@ -133,4 +123,5 @@ class ArticleSearchUI:
                 self.search_scope.set(next(name for name, code in SCOPES.items() if code == 'fulltext'))
                 self.start(preview=True)
             self.secondary(win, "改用全文重新预览", fulltext, width=175).grid(row=4, column=0, sticky="e", padx=20, pady=(0, 14))
+        self.secondary(win, "开始下载", self.start, width=110).grid(row=5, column=0, sticky="e", padx=20, pady=(0, 14))
         self.metrics["total"].set(str(len(rows)))

@@ -20,6 +20,27 @@ def cached_index(base, rows, issn=PRESETS[0].issn):
         "years": [2024, 2024], "created_at": "offline fixture", "records": rows})
 
 
+def page_from_rows(rows, body, journal=PRESETS[0]):
+    """Synthetic official response used only by isolated tests."""
+    offset, count = body['display']['offset'], body['display']['show']
+    def entry(row):
+        parts = str(row.get('date') or row['year']).split('-')
+        day = '-'.join(parts + ['01'] * (3 - len(parts)))
+        return {'doi': row['doi'], 'title': row.get('title', ''), 'sourceTitle': journal.name,
+                'publicationDate': day, 'pii': row.get('pii') or ''}
+    return {'resultsFound': len(rows), 'results': [entry(row) for row in rows[offset:offset+count]]}
+
+
+def offline_search_page(runner, body):
+    """Read a test fixture; never use a real connection or bypass production paging."""
+    from engine import load_json
+    path = Path('indexes') / f'{runner.config.start_year}-{runner.config.end_year}.json'
+    fixture = load_json(runner.state / path) or load_json(runner.base / path)
+    if not fixture:
+        raise AssertionError('Missing offline journal fixture')
+    return page_from_rows(fixture['records'], body, runner.journal)
+
+
 def run(output, online=False, pdf=False):
     import library_store
     original = library_store.STATE_HOME
@@ -73,8 +94,6 @@ def _run(output, online=False, pdf=False):
         assert match['issn'] == '0168-1699'
         assert details(match)['cas2025']['year'] == 2025
         assert search('computer and', category='林学 × 计算机')[0]['issn'] == match['issn']
-        from article_filter import filter_records
-        assert len(filter_records([{'title': 'Forest study'}, {'title': 'Other'}], 'forest')) == 1
         assert app.output_mode.get() in ('仅 XML', 'XML + PDF', '仅 PDF')
         results['prefix_subject_reference_and_filters'] = True
         from article_search import expression, search_spec
@@ -122,113 +141,114 @@ def _run(output, online=False, pdf=False):
                 recovered = collect_search(searcher)
                 assert recovered['complete'] and len(recovered['records']) == 2 and request.call_count == 1
             results['search_duplicate_recovery_and_partial_resume'] = True
-            base = Path(tmp) / PRESETS[0].issn
-            row = {"doi": "10.1016/j.demo.2024.123456", "year": 2024, "title": "Offline test", "date": "2024-01"}
-            cached_index(base, [row])
-            config = Config("OFFLINE_TEST_CREDENTIAL", PRESETS[0].url, 2024, 2024, Path(tmp), interval=0)
-            downloader = Downloader(config)
-            downloader.fetch = lambda doi: (xml(doi), {"http": 200})
-            downloader.run()
-            assert downloader.new_count == 1
-            results["download_and_validate"] = True
-            resumed = Downloader(config)
-            def no_request(doi):
-                raise AssertionError("Valid saved file triggered a network request")
-            resumed.fetch = no_request
-            resumed.run()
-            assert resumed.reused == 1 and resumed.new_count == 0
-            results["resume_skips_valid_xml"] = True
-            target, _, _ = paths_for(base, row)
-            target.write_bytes(b"<truncated>")
-            repaired = Downloader(config)
-            repaired.fetch = lambda doi: (xml(doi), {"http": 200})
-            repaired.run()
-            assert repaired.new_count == 1 and repaired.reused == 0
-            results["corrupt_file_redownloaded"] = True
-            limited_root = Path(tmp) / "limited"
-            limited_base = limited_root / PRESETS[0].issn
-            rows = [{**row, "doi": f"10.1016/j.demo.2024.limit{i}"} for i in range(3)]
-            cached_index(limited_base, rows)
-            limited_cfg = Config("OFFLINE_TEST_CREDENTIAL", PRESETS[0].url, 2024, 2024,
-                                 limited_root, interval=0, max_downloads=1)
-            for expected_reused in (0, 1):
-                limited = Downloader(limited_cfg)
-                calls = []
-                def limited_fetch(doi):
-                    calls.append(doi)
-                    return xml(doi), {"http": 200}
-                limited.fetch = limited_fetch
-                limited.run()
-                assert limited.new_count == 1 and limited.reused == expected_reused
-                assert len(calls) == 1
-            results["download_limit_and_resume"] = True
-            from library_inventory import scan_existing
-            inventory = scan_existing(base, 2024, 2024)
-            assert len(inventory["saved"]) == 1
-            renamed = target.with_name("user-renamed.xml")
-            target.rename(renamed)
-            imported = Downloader(config)
-            imported.fetch = no_request
-            imported.run()
-            assert imported.reused == 1 and imported.new_count == 0
-            results["renamed_xml_resume"] = True
-            assert all(path.suffix == ".xml" for path in base.rglob("*") if path.is_file())
-            results["clean_paper_folders"] = True
-            from credential_store import save_key, load_key, forget_key, key_file
-            private_dir = Path(tmp) / "credentials"
-            save_key(private_dir, config.api_key)
-            assert load_key(private_dir) == config.api_key
-            assert config.api_key.encode() not in key_file(private_dir).read_bytes()
-            forget_key(private_dir)
-            results["encrypted_key_roundtrip"] = True
-            for path in Path(tmp).rglob("*"):
-                if path.is_file():
-                    assert config.api_key.encode() not in path.read_bytes()
-            results["no_credential_on_disk"] = True
-            if pdf:
-                import sys
-                spawned = []
-                sys.addaudithook(lambda event, args: spawned.append(True) if event == 'subprocess.Popen' else None)
-                from pdf_export import PdfConfig, PdfExporter
-                pdf_xml = Path(tmp) / "pdf-fixture" / "2024"
-                pdf_xml.mkdir(parents=True)
-                data = xml().replace(b'<dc:title>Offline test article</dc:title>',
-                    b'<dc:title>Offline test article</dc:title><prism:coverDate>2024-01-01</prism:coverDate>')
-                data = data.replace(b'<article><body>',
-                    b'<article><head><title>Offline test article</title></head><body>')
-                data = data.replace(b'</para>', (' Unicode α and é. '
-                    '<math xmlns="http://www.w3.org/1998/Math/MathML"><mfrac><mi>x</mi><mn>2</mn></mfrac></math>'
-                    '</para><table><label>Table 1</label><tgroup cols="2"><tbody>'
-                    '<row><entry>Frozen scientific content</entry><entry>42.5</entry></row>'
-                    '</tbody></tgroup></table>').encode('utf-8'), 1)
-                (pdf_xml / "sample.xml").write_bytes(data)
-                pdf_cfg = PdfConfig(source=pdf_xml.parent, output=Path(tmp) / "pdf-output")
-                pdf_events = []
-                first = PdfExporter(pdf_cfg, emit=lambda **event: pdf_events.append(event)).run()
-                assert first["saved"] == 1 and first["pending"] == 0, [event.get('text') for event in pdf_events if event.get('kind') == 'log']
-                second = PdfExporter(pdf_cfg).run()
-                assert second["reused"] == 1
-                pdf_file = next(pdf_cfg.output.rglob("*.pdf"))
-                pdf_file.write_bytes(b"truncated PDF")
-                third = PdfExporter(pdf_cfg).run()
-                assert third["saved"] == 1 and third["reused"] == 0
-                results["pdf_render_resume_repair"] = True
-                pipeline_root = Path(tmp) / 'pipeline'
-                pipeline_base = pipeline_root / PRESETS[0].issn
-                cached_index(pipeline_base, [row])
-                pipeline_cfg = Config('OFFLINE_TEST_CREDENTIAL', PRESETS[0].url, 2024, 2024,
-                                      pipeline_root, interval=0, output_mode='pdf')
-                pipeline = Downloader(pipeline_cfg)
-                pipeline.fetch = lambda doi: (data, {'http': 200})
-                pipeline.run()
-                assert pipeline.new_count == 1 and not list(pipeline_base.rglob('*.xml'))
-                only_pdf = Downloader(pipeline_cfg)
-                only_pdf.fetch = no_request
-                only_pdf.run()
-                assert only_pdf.reused == 1 and only_pdf.new_count == 0
-                results['sequential_pdf_only_resume'] = True
-                results['native_pdf_no_subprocess'] = not spawned
-                assert not spawned
+            with patch('article_search.request_page', side_effect=offline_search_page):
+                base = Path(tmp) / PRESETS[0].issn
+                row = {"doi": "10.1016/j.demo.2024.123456", "year": 2024, "title": "Offline test", "date": "2024-01"}
+                cached_index(base, [row])
+                config = Config("OFFLINE_TEST_CREDENTIAL", PRESETS[0].url, 2024, 2024, Path(tmp), interval=0)
+                downloader = Downloader(config)
+                downloader.fetch = lambda doi: (xml(doi), {"http": 200})
+                downloader.run()
+                assert downloader.new_count == 1
+                results["download_and_validate"] = True
+                resumed = Downloader(config)
+                def no_request(doi):
+                    raise AssertionError("Valid saved file triggered a network request")
+                resumed.fetch = no_request
+                resumed.run()
+                assert resumed.reused == 1 and resumed.new_count == 0
+                results["resume_skips_valid_xml"] = True
+                target, _, _ = paths_for(base, row)
+                target.write_bytes(b"<truncated>")
+                repaired = Downloader(config)
+                repaired.fetch = lambda doi: (xml(doi), {"http": 200})
+                repaired.run()
+                assert repaired.new_count == 1 and repaired.reused == 0
+                results["corrupt_file_redownloaded"] = True
+                limited_root = Path(tmp) / "limited"
+                limited_base = limited_root / PRESETS[0].issn
+                rows = [{**row, "doi": f"10.1016/j.demo.2024.limit{i}"} for i in range(3)]
+                cached_index(limited_base, rows)
+                limited_cfg = Config("OFFLINE_TEST_CREDENTIAL", PRESETS[0].url, 2024, 2024,
+                                     limited_root, interval=0, max_downloads=1)
+                for expected_reused in (0, 1):
+                    limited = Downloader(limited_cfg)
+                    calls = []
+                    def limited_fetch(doi):
+                        calls.append(doi)
+                        return xml(doi), {"http": 200}
+                    limited.fetch = limited_fetch
+                    limited.run()
+                    assert limited.new_count == 1 and limited.reused == expected_reused
+                    assert len(calls) == 1
+                results["download_limit_and_resume"] = True
+                from library_inventory import scan_existing
+                inventory = scan_existing(base, 2024, 2024)
+                assert len(inventory["saved"]) == 1
+                renamed = target.with_name("user-renamed.xml")
+                target.rename(renamed)
+                imported = Downloader(config)
+                imported.fetch = no_request
+                imported.run()
+                assert imported.reused == 1 and imported.new_count == 0
+                results["renamed_xml_resume"] = True
+                assert all(path.suffix == ".xml" for path in base.rglob("*") if path.is_file())
+                results["clean_paper_folders"] = True
+                from credential_store import save_key, load_key, forget_key, key_file
+                private_dir = Path(tmp) / "credentials"
+                save_key(private_dir, config.api_key)
+                assert load_key(private_dir) == config.api_key
+                assert config.api_key.encode() not in key_file(private_dir).read_bytes()
+                forget_key(private_dir)
+                results["encrypted_key_roundtrip"] = True
+                for path in Path(tmp).rglob("*"):
+                    if path.is_file():
+                        assert config.api_key.encode() not in path.read_bytes()
+                results["no_credential_on_disk"] = True
+                if pdf:
+                    import sys
+                    spawned = []
+                    sys.addaudithook(lambda event, args: spawned.append(True) if event == 'subprocess.Popen' else None)
+                    from pdf_export import PdfConfig, PdfExporter
+                    pdf_xml = Path(tmp) / "pdf-fixture" / "2024"
+                    pdf_xml.mkdir(parents=True)
+                    data = xml().replace(b'<dc:title>Offline test article</dc:title>',
+                        b'<dc:title>Offline test article</dc:title><prism:coverDate>2024-01-01</prism:coverDate>')
+                    data = data.replace(b'<article><body>',
+                        b'<article><head><title>Offline test article</title></head><body>')
+                    data = data.replace(b'</para>', (' Unicode α and é. '
+                        '<math xmlns="http://www.w3.org/1998/Math/MathML"><mfrac><mi>x</mi><mn>2</mn></mfrac></math>'
+                        '</para><table><label>Table 1</label><tgroup cols="2"><tbody>'
+                        '<row><entry>Frozen scientific content</entry><entry>42.5</entry></row>'
+                        '</tbody></tgroup></table>').encode('utf-8'), 1)
+                    (pdf_xml / "sample.xml").write_bytes(data)
+                    pdf_cfg = PdfConfig(source=pdf_xml.parent, output=Path(tmp) / "pdf-output")
+                    pdf_events = []
+                    first = PdfExporter(pdf_cfg, emit=lambda **event: pdf_events.append(event)).run()
+                    assert first["saved"] == 1 and first["pending"] == 0, [event.get('text') for event in pdf_events if event.get('kind') == 'log']
+                    second = PdfExporter(pdf_cfg).run()
+                    assert second["reused"] == 1
+                    pdf_file = next(pdf_cfg.output.rglob("*.pdf"))
+                    pdf_file.write_bytes(b"truncated PDF")
+                    third = PdfExporter(pdf_cfg).run()
+                    assert third["saved"] == 1 and third["reused"] == 0
+                    results["pdf_render_resume_repair"] = True
+                    pipeline_root = Path(tmp) / 'pipeline'
+                    pipeline_base = pipeline_root / PRESETS[0].issn
+                    cached_index(pipeline_base, [row])
+                    pipeline_cfg = Config('OFFLINE_TEST_CREDENTIAL', PRESETS[0].url, 2024, 2024,
+                                          pipeline_root, interval=0, output_mode='pdf')
+                    pipeline = Downloader(pipeline_cfg)
+                    pipeline.fetch = lambda doi: (data, {'http': 200})
+                    pipeline.run()
+                    assert pipeline.new_count == 1 and not list(pipeline_base.rglob('*.xml'))
+                    only_pdf = Downloader(pipeline_cfg)
+                    only_pdf.fetch = no_request
+                    only_pdf.run()
+                    assert only_pdf.reused == 1 and only_pdf.new_count == 0
+                    results['sequential_pdf_only_resume'] = True
+                    results['native_pdf_no_subprocess'] = not spawned
+                    assert not spawned
             if online:
                 results["online_metadata"] = []
                 for journal in PRESETS:

@@ -1,8 +1,8 @@
 """Parameterized, resumable Elsevier XML downloader. Only the standard library.
 
-No credential is written to paper folders or logs. Crossref supplies the full candidate
-list, ScienceDirect Search supplies optional filtered metadata, and Article Retrieval
-supplies entitled full text.
+No credential is written to paper folders or logs. Elsevier supplies journal contents,
+keyword search results and entitled full text. Crossref is used only to resolve
+custom journals absent from the bundled catalogue.
 """
 from __future__ import annotations
 
@@ -28,9 +28,8 @@ import uuid
 
 from xml_utils import atomic_bytes, inspect_xml, plain_text, save_fulltext
 from library_store import state_dir, sidecar_path, existing_sidecar, migrate_library
-from article_search import uses_api
 
-VERSION = "1.8.1"
+VERSION = "1.9.0"
 AGENT = f"JournalXMLDownloader/{VERSION} (personal research)"
 FULLTEXT = {"fulltext_structured", "fulltext_rawtext"}
 NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)
@@ -114,16 +113,15 @@ class Config:
     output: Path
     network: str = "direct"
     issn: str = ""
-    refresh: bool = False
     retry_failed: bool = False
     interval: float = 3.0
     timeout: float = 30.0
     max_downloads: int = 0
     output_mode: str = "xml"
     title_filter: str = ""
-    filter_mode: str = "any"
+    filter_mode: str = "native"
     pdf_browser: str = ""
-    search_scope: str = "local"
+    search_scope: str = "fulltext"
     search_sort: str = "relevance"
     pdf_method: str = "auto"
 
@@ -336,33 +334,6 @@ def quota_deadline(value):
         return None
 
 
-def date_value(item, field):
-    parts = (item.get(field) or {}).get("date-parts", [[]])[0]
-    return "-".join(str(n) if i == 0 else f"{n:02d}" for i, n in enumerate(parts))
-
-
-def metadata_record(item, start, end):
-    doi = str(item.get("DOI", "")).strip().lower()
-    if not doi.startswith("10.") or "/" not in doi:
-        return None
-    field = next((f for f in ("published-print", "published", "published-online", "issued")
-                  if date_value(item, f)), None)
-    date = date_value(item, field) if field else ""
-    if not date[:4].isdigit() or not start <= int(date[:4]) <= end:
-        return None
-    title = html.unescape((item.get("title") or [""])[0])
-    links = item.get("link", [])
-    pii = next((m.group(0) for link in links if
-                (m := re.search(r"S\d{15}[\dX]", link.get("URL", "")))), None)
-    return {"doi": doi, "title": title, "journal": item.get("container-title", []),
-            "year": int(date[:4]), "date": date, "date_source": field,
-            "published_online": date_value(item, "published-online"), "pii": pii,
-            "volume": item.get("volume"), "issue": item.get("issue"),
-            "possible_correction_or_editorial": bool(re.search(
-                "corrigendum|erratum|editorial|retraction|withdrawn|expression of concern", title, re.I)),
-            "crossref_type": item.get("type")}
-
-
 def paths_for(base, row):
     doi = row["doi"]
     name = re.sub(r"[^a-zA-Z0-9._-]", "_", doi)[:110] + "_" + hashlib.sha256(doi.encode()).hexdigest()[:8]
@@ -403,7 +374,7 @@ class Downloader:
     def state(self):
         return state_dir(self.base)
 
-    def __init__(self, config, emit=lambda **event: None, control=None):
+    def __init__(self, config, emit=lambda **event: None, control=None, search_snapshot=None):
         config.validate()
         self.config = config
         self.key = config.api_key.strip()
@@ -418,6 +389,7 @@ class Downloader:
         self.output_processor = None
         self.candidate_total = 0
         self.search_info = {}
+        self.search_snapshot = search_snapshot
         self.failures = {}
         self.latest = {}
         self.new_count = 0
@@ -450,17 +422,17 @@ class Downloader:
                     return json.loads(self.read_response(response))
             except urllib.error.HTTPError as error:
                 if error.code not in (408, 429, 500, 502, 503, 504):
-                    raise ActionRequired(f"论文列表服务返回 HTTP {error.code}，请稍后重试。") from None
+                    raise ActionRequired(f"期刊识别服务返回 HTTP {error.code}，请稍后重试。") from None
                 seconds = retry_seconds(error.headers.get("Retry-After"))
                 error.close()
             except NETWORK_ERRORS as error:
                 if isinstance(getattr(error, "reason", error), ssl.SSLCertVerificationError):
-                    raise ActionRequired("论文列表服务的证书校验失败，请检查网络和系统时间。") from None
+                    raise ActionRequired("期刊识别服务的证书校验失败，请检查网络和系统时间。") from None
                 seconds = None
             except (ValueError, KeyError):
                 seconds = None
             attempts += 1
-            self.control.wait(max(seconds or 0, min(300, 2 ** min(attempts, 8))), "获取论文列表失败，自动重试")
+            self.control.wait(max(seconds or 0, min(300, 2 ** min(attempts, 8))), "识别期刊失败，自动重试")
 
     def read_response(self, response):
         chunks, size = [], 0
@@ -506,74 +478,6 @@ class Downloader:
         issn = next((x["value"] for x in item.get("issn-type", []) if x.get("type") == "print"), item["ISSN"][0])
         return Journal(item["title"], slug, issn)
 
-    def collect(self):
-        cfg = self.config
-        path = self.state / "indexes" / f"{cfg.start_year}-{cfg.end_year}.json"
-        cached = load_json(path, {})
-        if (not cfg.refresh and cached.get("complete") is True and cached.get("issn") == self.journal.issn
-                and cached.get("years") == [cfg.start_year, cfg.end_year]):
-            records = cached.get("records")
-            if isinstance(records, list) and all(isinstance(r, dict) and isinstance(r.get("doi"), str)
-                    and isinstance(r.get("year"), int) and cfg.start_year <= r["year"] <= cfg.end_year for r in records):
-                if len({r["doi"] for r in records}) == len(records):
-                    self.log(f"使用已保存的论文列表：{len(records)} 条（{cached.get('created_at', '')}）。")
-                    return records
-        # Reuse the verified CLI's finished index without requiring a new network query.
-        legacy = load_json(self.state / "index_summary.json", None) or load_json(self.base / "index_summary.json", {})
-        bounds = legacy.get("requested_years", [])
-        if (not cfg.refresh and legacy.get("issn") == self.journal.issn and len(bounds) == 2
-                and bounds[0] <= cfg.start_year <= cfg.end_year <= bounds[1]
-                and legacy.get("queries") and all(q.get("exhausted") for q in legacy["queries"])):
-            try:
-                manifest = self.state / "manifest.jsonl"
-                if not manifest.exists():
-                    manifest = self.base / "manifest.jsonl"
-                old_records = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line]
-                if (len(old_records) == legacy.get("records") and
-                        len({r["doi"] for r in old_records}) == len(old_records)):
-                    records = [r for r in old_records if cfg.start_year <= r["year"] <= cfg.end_year]
-                    save_json(path, {"complete": True, "created_at": legacy.get("checked_at"),
-                                    "issn": self.journal.issn, "years": [cfg.start_year, cfg.end_year],
-                                    "source": "verified CLI index", "records": records})
-                    self.log(f"已复用原命令行文库的完整列表：{len(records)} 条。")
-                    return records
-            except (OSError, ValueError, KeyError, TypeError):
-                self.log("原有列表不完整，将重新获取论文列表。")
-        raw, queries = {}, []
-        for mode in ("print-pub-date", "pub-date"):
-            cursor, seen, cursors = "*", set(), set()
-            while True:
-                self.control.checkpoint()
-                self.emit(kind="phase", text=f"正在获取论文列表… 已发现 {len(raw)} 条记录")
-                params = {"filter": f"from-{mode}:{cfg.start_year}-01-01,until-{mode}:{cfg.end_year}-12-31",
-                          "rows": 500, "cursor": cursor,
-                          "select": "DOI,title,container-title,published-print,published,published-online,issued,volume,issue,type,link"}
-                data = self.public_json(f"https://api.crossref.org/journals/{self.journal.issn}/works?" +
-                                        urllib.parse.urlencode(params))["message"]
-                items = data["items"]
-                if not items:
-                    queries.append({"mode": mode, "total": data["total-results"], "retrieved": len(seen), "exhausted": True})
-                    break
-                before = len(seen)
-                for item in items:
-                    doi = item["DOI"].lower()
-                    seen.add(doi)
-                    raw[doi] = item
-                next_cursor = data.get("next-cursor")
-                if len(seen) == before or not next_cursor:
-                    raise ActionRequired("论文列表分页没有继续前进，尚未生成完整列表；请稍后重新开始。")
-                # Crossref may return the same opaque cursor; progress is measured by DOIs.
-                cursors.add(cursor)
-                cursor = next_cursor
-                self.log(f"论文列表：{len(seen)} / {data['total-results']}（{mode}）")
-                self.control.wait(1)
-        records = [record for item in raw.values() if (record := metadata_record(item, cfg.start_year, cfg.end_year))]
-        records.sort(key=lambda r: (r["date"], r["doi"]))
-        save_json(path, {"complete": True, "created_at": timestamp(), "issn": self.journal.issn,
-                         "years": [cfg.start_year, cfg.end_year], "queries": queries, "records": records})
-        self.log(f"论文列表已建立：{len(records)} 条。包含勘误、编委会等已登记条目。")
-        return records
-
     def persist_pause(self, deadline, reason):
         save_json(self.state / "server_pause.json", {"deadline": deadline, "reason": reason})
 
@@ -594,7 +498,7 @@ class Downloader:
                    "total": len(self.records), "saved": len(self.saved), "reused": self.reused,
                    "downloaded_this_run": self.new_count, "pending": len(pending),
                    "max_downloads": self.config.max_downloads, "download_target": self.download_target,
-                   "failed_or_review": len(self.failures), "source": "ScienceDirect Search V2; Elsevier XML" if uses_api(self.config.search_scope, self.config.title_filter) else "Crossref candidate list; Elsevier XML"}
+                   "failed_or_review": len(self.failures), "source": "Elsevier Article Metadata / ScienceDirect Search; Elsevier XML"}
         summary.update(output_mode=self.config.output_mode, candidate_total=self.candidate_total,
                        excluded=sum(self.search_info.get('excluded', {}).values()) if self.search_info else max(0, self.candidate_total - len(self.records)),
                        search_complete=self.search_info.get('complete', True),
@@ -616,22 +520,14 @@ class Downloader:
         self.emit(kind="library", path=str(self.base), journal=self.journal.name, issn=self.journal.issn)
 
     def select_records(self):
-        if uses_api(self.config.search_scope, self.config.title_filter):
-            from article_search import collect_search
-            result = collect_search(self)
-            self.records = result["records"]
-            self.candidate_total = result["results_found"]
-            self.search_info = result
-            self.emit(kind='search_notice', text=result.get('notice', ''))
-        else:
-            self.search_info = {}
-            candidates = self.collect()
-            self.candidate_total = len(candidates)
-            save_lines(self.state / "manifest.jsonl", candidates)
-            from article_filter import filter_records
-            self.records = filter_records(candidates, self.config.title_filter, self.config.filter_mode) if self.config.title_filter.strip() else candidates
-            if self.config.title_filter.strip():
-                self.log(f"本地题名筛选：{len(candidates)} 条中匹配 {len(self.records)} 条。只匹配 Crossref 题名，不检索摘要或正文。")
+        from article_search import collect_search
+        result = collect_search(self)
+        self.records = result["records"]
+        self.candidate_total = result["results_found"]
+        self.search_info = result
+        self.emit(kind='search_notice', text=result.get('notice', ''))
+        if not self.config.title_filter.strip() and result['complete']:
+            save_lines(self.state / "manifest.jsonl", self.records)
 
     def preview(self):
         self.initialize_library()
@@ -639,6 +535,7 @@ class Downloader:
             migrate_library(self.base)
             self.select_records()
             return {"records": self.records, "candidate_total": self.candidate_total,
+                    "snapshot": {"result": self.search_info, "state": str(self.state), "checked_at": time.monotonic()},
                     "search_complete": self.search_info.get('complete', True),
                     "search_notice": self.search_info.get('notice', ''),
                     "scope": self.config.search_scope, "query": self.config.title_filter,

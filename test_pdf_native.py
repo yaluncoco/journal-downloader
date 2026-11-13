@@ -18,11 +18,14 @@ from library_store import sidecar_path
 from test_pdf import fixture, DOI, NoWait, png
 from test_pipeline import sample_pdf
 from test_engine import Opener, Response
-from smoke_test import cached_index
+from smoke_test import offline_search_page, cached_index
 
 
 class NativePdfTests(unittest.TestCase):
     def setUp(self):
+        search = patch('article_search.request_page', side_effect=offline_search_page)
+        search.start()
+        self.addCleanup(search.stop)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)

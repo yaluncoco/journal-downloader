@@ -9,12 +9,11 @@ from unittest.mock import patch
 from pypdf import PdfWriter
 from pypdf.generic import DictionaryObject, NameObject, DecodedStreamObject
 
-from article_filter import filter_records
 from engine import Config, Downloader, PRESETS, Cancelled, ActionRequired, paths_for, save_fulltext, load_json, save_json
 from library_store import sidecar_path, state_dir
 from pdf_export import PdfExporter, RENDERER_VERSION, validate_pdf
 from pdf_inventory import scan_pdfs
-from smoke_test import cached_index
+from smoke_test import offline_search_page, page_from_rows, cached_index
 from test_pdf import fixture, DOI, NoWait
 
 
@@ -37,6 +36,9 @@ def article(doi):
 
 class PipelineTests(unittest.TestCase):
     def setUp(self):
+        search = patch('article_search.request_page', side_effect=offline_search_page)
+        search.start()
+        self.addCleanup(search.stop)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
@@ -200,9 +202,15 @@ class PipelineTests(unittest.TestCase):
         self.cfg.title_filter = 'forest, deep learning'
         self.cfg.filter_mode = 'all'
         first = self.runner()
-        first.run()
+        self.cfg.title_filter = ''
+        from article_search import cache_path, search_spec, cached_search
+        # A complete unfiltered official snapshot remains available for local counts.
+        unfiltered = self.runner().preview()
+        self.cfg.title_filter = 'forest, deep learning'
+        with patch('article_search.request_page', side_effect=lambda runner, body: page_from_rows(self.rows[:1], body)):
+            first.run()
         self.assertEqual([row['doi'] for row in first.records], [self.rows[0]['doi']])
-        self.assertEqual(len(load_json(first.state / 'indexes/2024-2024.json')['records']), 3)
+        self.assertEqual(len(cached_search(first.state, unfiltered['snapshot']['result']['spec'])['records']), 3)
         self.assertEqual(len((first.state / 'manifest.jsonl').read_text().splitlines()), 3)
         self.cfg.title_filter = ''
         self.order.clear()
@@ -214,20 +222,10 @@ class PipelineTests(unittest.TestCase):
     def test_zero_matches_makes_no_api_or_pdf_requests(self):
         self.cfg.title_filter = 'unmatched keyword'
         runner = self.runner()
-        runner.run()
+        with patch('article_search.request_page', return_value={'resultsFound': 0, 'results': []}):
+            runner.run()
         self.assertEqual(self.order, [])
-        self.assertEqual(load_json(runner.state / 'download_summary.json')['excluded'], 3)
-
-
-class ArticleFilterTests(unittest.TestCase):
-    def test_phrase_any_all_case_hyphens_and_boundaries(self):
-        rows = [{'title': 'Deep-learning for Forest Mapping'}, {'title': 'Crop mapping'}, {'title': 'Rainforest'}]
-        self.assertEqual(filter_records(rows, 'forest，deep learning', 'all'), rows[:1])
-        self.assertEqual(filter_records(rows, 'FOREST; crop', 'any'), rows[:2])
-        self.assertEqual(filter_records(rows, ''), rows)
-        self.assertEqual(filter_records([{'title': '<i>Crop</i> mapping'}], 'crop'), [{'title': '<i>Crop</i> mapping'}])
-        with self.assertRaises(ValueError):
-            filter_records(rows, ', ; ')
+        self.assertEqual(load_json(runner.state / 'download_summary.json')['total'], 0)
 
 
 if __name__ == '__main__':

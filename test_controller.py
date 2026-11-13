@@ -7,8 +7,9 @@ import unittest
 from unittest.mock import patch
 
 import controller
+from article_search import request_page
 from engine import Downloader, Config, Control, PRESETS, VERSION
-from smoke_test import cached_index, xml
+from smoke_test import offline_search_page, cached_index, xml
 from ui import App
 from pdf_export import PdfConfig
 from updater import Release
@@ -16,11 +17,19 @@ from updater import Release
 
 class ControllerTests(unittest.TestCase):
     def setUp(self):
+        search = patch('article_search.request_page', side_effect=offline_search_page)
+        search.start()
+        self.addCleanup(search.stop)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         state = patch("library_store.STATE_HOME", Path(tmp.name))
         state.start()
         self.addCleanup(state.stop)
+
+    def mock_official_search(self):
+        search = patch('article_search.request_page', side_effect=request_page)
+        search.start()
+        self.addCleanup(search.stop)
 
     def quiet_app(self, settings=None):
         app = App(check_updates=False, remember_credentials=False, scan_libraries=False,
@@ -42,16 +51,19 @@ class ControllerTests(unittest.TestCase):
 
     def test_search_defaults_and_legacy_filter_migration(self):
         app = self.quiet_app({'title_filter': 'forest, crop', 'filter_mode': 'all'})
-        self.assertEqual(app.search_scope.get(), '本地题名筛选')
+        self.assertEqual(app.search_scope.get(), '题名 · ScienceDirect')
         self.assertEqual(app.filter_mode.get(), '全部词组')
-        app.search_scope.set('全文 · ScienceDirect')
-        app.filter_mode.set('官网语法')
-        app.search_scope.set('本地题名筛选')
-        self.assertEqual(app.filter_mode.get(), '任一词组')
+        self.assertFalse(hasattr(app, 'refresh_index'))
+
+    def test_explicit_local_scope_migrates_to_official_title_search(self):
+        migrated = self.quiet_app({'search_scope': 'local', 'title_filter': 'TLS', 'filter_mode': 'any'})
+        self.assertEqual(migrated.search_scope.get(), '题名 · ScienceDirect')
+        self.assertEqual(migrated.filter_mode.get(), '任一词组')
 
     def test_search_preview_runs_in_worker_and_never_downloads(self):
         from test_article_search import entry, response
         from test_engine import Opener
+        self.mock_official_search()
         app = self.quiet_app()
         self.assertEqual(app.search_scope.get(), '全文 · ScienceDirect')
         self.assertEqual(app.filter_mode.get(), '官网语法')
@@ -76,8 +88,18 @@ class ControllerTests(unittest.TestCase):
             saved = json.loads((Path(tmp) / 'settings/settings.json').read_text(encoding='utf-8'))
             self.assertEqual(saved['search_scope'], 'fulltext')
             self.assertEqual(saved['filter_mode'], 'native')
+            with patch.object(Downloader, 'fetch', return_value=(xml(entry()['doi']), {'http': 200})) as fetch:
+                app.start()
+                app.worker.join(5)
+                self.assertFalse(app.worker.is_alive())
+                until = time.monotonic() + 2
+                while not app.events.empty() and time.monotonic() < until:
+                    app._poll()
+                self.assertEqual(app.status.get(), '下载完成')
+                fetch.assert_called_once_with(entry()['doi'])
 
     def test_api_query_change_does_not_show_crossref_title_count(self):
+        self.mock_official_search()
         from article_search import collect_search
         from test_article_search import entry, response
         from test_engine import Opener
@@ -516,7 +538,9 @@ class ControllerTests(unittest.TestCase):
                     self.assertNotIn("api_key", saved)
                     app.start()
                     app.worker.join(5)
-                    app._poll()
+                    deadline = time.monotonic() + 2
+                    while not app.events.empty() and time.monotonic() < deadline:
+                        app._poll()
                     self.assertEqual(app.metrics["reused"].get(), "1")
             finally:
                 if app.worker and app.worker.is_alive():

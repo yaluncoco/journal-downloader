@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 
 import engine as e
-from smoke_test import xml, cached_index
+from smoke_test import offline_search_page, xml, cached_index
 
 
 class Response(io.BytesIO):
@@ -36,6 +36,9 @@ class Opener:
 
 class EngineTests(unittest.TestCase):
     def setUp(self):
+        search = patch('article_search.request_page', side_effect=offline_search_page)
+        search.start()
+        self.addCleanup(search.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.state_patch = patch("library_store.STATE_HOME", self.root / "app-state")
@@ -75,14 +78,6 @@ class EngineTests(unittest.TestCase):
         self.cfg.api_key = "secret\nheader"
         with self.assertRaises(ValueError):
             self.cfg.validate()
-
-    def test_print_year_takes_precedence(self):
-        item = {"DOI": "10.1016/J.TEST", "title": ["A &amp; B"], "published-print": {"date-parts": [[2024, 1]]},
-                "published-online": {"date-parts": [[2023, 11, 20]]}}
-        row = e.metadata_record(item, 2024, 2024)
-        self.assertEqual(row["year"], 2024)
-        self.assertEqual(row["title"], "A & B")
-        self.assertIsNone(e.metadata_record(item, 2023, 2023))
 
     def test_download_limit_validation(self):
         for value in (-1, 1.5, True, "10", None):
@@ -210,15 +205,6 @@ class EngineTests(unittest.TestCase):
         e.save_json(self.root / "index_summary.json", {"issn": "0034-4257"})
         self.assertEqual(e.library_path(self.root, e.PRESETS[0]), self.root)
         self.assertEqual(e.library_path(self.root, e.PRESETS[1]), self.root / "0924-2716")
-
-    def test_legacy_index_reuse_without_network(self):
-        e.save_json(self.base / "index_summary.json", {"issn": "0034-4257", "requested_years": [2024, 2027],
-                    "records": 1, "queries": [{"exhausted": True}]})
-        e.save_lines(e.state_dir(self.base) / "manifest.jsonl", [self.row])
-        r = self.runner()
-        r.base, r.journal = self.base, e.PRESETS[0]
-        r.public_json = lambda url: self.fail("Complete legacy index must work offline")
-        self.assertEqual(r.collect(), [self.row])
 
     def test_response_length_mismatch(self):
         with self.assertRaises(e.http.client.IncompleteRead):
@@ -349,29 +335,6 @@ class EngineTests(unittest.TestCase):
         r.run()
         self.assertEqual(r.new_count, 1)
         self.assertEqual(len(r.failures), 0)
-
-    def test_index_collect_union_and_repeated_cursor(self):
-        r = self.runner()
-        r.base = self.base
-        r.journal = e.PRESETS[0]
-        item = {"DOI": self.row["doi"], "title": ["Test"], "published-print": {"date-parts": [[2024, 1]]}}
-        pages = iter([{"items": [item], "total-results": 1, "next-cursor": "*"},
-                      {"items": [], "total-results": 1},
-                      {"items": [item], "total-results": 1, "next-cursor": "cursor"},
-                      {"items": [], "total-results": 1}])
-        r.public_json = lambda url: {"message": next(pages)}
-        records = r.collect()
-        self.assertEqual(len(records), 1)
-        self.assertTrue(e.load_json(e.state_dir(self.base) / "indexes" / "2024-2024.json")["complete"])
-
-    def test_index_bad_pagination_not_persisted(self):
-        r = self.runner()
-        r.base, r.journal = self.base, e.PRESETS[0]
-        item = {"DOI": self.row["doi"], "published-print": {"date-parts": [[2024]]}}
-        r.public_json = lambda url: {"message": {"items": [item], "total-results": 2, "next-cursor": "same"}}
-        with self.assertRaises(e.ActionRequired):
-            r.collect()
-        self.assertFalse((e.state_dir(self.base) / "indexes" / "2024-2024.json").exists())
 
     def test_cancelled_scan_keeps_existing_xml(self):
         cached_index(self.base, [self.row])

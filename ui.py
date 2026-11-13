@@ -347,20 +347,20 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI, ArticleSearchUI):
         self.action_buttons = (self.open_button, self.pdf_button, self.stop_button, self.pause_button, self.start_button)
 
     def _output_options(self, parent):
-        from article_filter import OUTPUT_MODES, FILTER_MODES
+        from article_filter import OUTPUT_MODES
         card = self.card(parent)
         card.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         card.grid_columnconfigure(0, weight=1)
-        self.label(card, "输出与筛选", font=self.bold_font).grid(row=0, column=0, sticky="w", padx=18, pady=(8, 6))
+        self.label(card, "输出与检索", font=self.bold_font).grid(row=0, column=0, sticky="w", padx=18, pady=(8, 6))
         self.editable(ctk.CTkSegmentedButton(card, values=list(OUTPUT_MODES), variable=self.output_mode,
             height=32, corner_radius=9, border_width=3, fg_color="#F0F4F7",
             selected_color="#D3EEEE", selected_hover_color="#BFE4E5", unselected_color="#F0F4F7",
             unselected_hover_color="#E0E9EF", text_color=INK, font=self.small_font,
             dynamic_resizing=False)).grid(row=1, column=0, sticky="ew", padx=16)
-        self.label(card, "PDF 默认官方优先，未授权时内置单栏合成。\n无需浏览器；校验完成后才移除 XML。",
+        self.label(card, "PDF 优先官方全文，也可自动合成。\n默认无需浏览器。",
             font=self.small_font, color=MUTED, justify="left", wraplength=252).grid(row=2, column=0, sticky="w", padx=18, pady=(5, 6))
         from article_search import SCOPES
-        self.label(card, "论文关键词（留空获取全部）", font=self.small_font, color=INK).grid(row=3, column=0, sticky="w", padx=18, pady=(0, 6))
+        self.label(card, "论文关键词（留空获取期刊目录）", font=self.small_font, color=INK).grid(row=3, column=0, sticky="w", padx=18, pady=(0, 6))
         self.search_entry = self.entry(card, self.title_filter, placeholder_text='如 forest AND "deep learning"', width=240)
         self.search_entry.configure(height=36)
         self.search_entry.grid(row=4, column=0, sticky="ew", padx=16)
@@ -504,12 +504,11 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI, ArticleSearchUI):
         self.advanced_window = win
         win.title("高级设置")
         win.transient(self)
-        fit_window(win, (540, 520))
+        fit_window(win, (540, 390))
         body = scroll_body(win)
         self.label(body, "高级设置", font=ctk.CTkFont(FONT, 22, weight="bold")).grid(row=0, column=0, sticky="w", padx=6, pady=(12, 12))
         row = 1
         for text, variable in (("直连 Elsevier（推荐，忽略系统 HTTP 代理）", self.direct),
-                ("更新论文列表，获取新发表的记录", self.refresh_index),
                 ("重新尝试之前无全文 / 失败 / 待检查的条目", self.retry_failed)):
             line = ctk.CTkFrame(body, fg_color="transparent")
             line.grid(row=row, column=0, sticky="ew", padx=6, pady=10)
@@ -524,11 +523,10 @@ class App(ctk.CTk, Controller, UpdateUI, CatalogUI, ArticleSearchUI):
             label.bind("<Button-1>", lambda event, control=check: control.toggle())
             if self.worker and self.worker.is_alive():
                 check.configure(state="disabled")
-        wrap_to(self.label(body, "ISSN（无法自动识别期刊时填写）", font=self.small_font, color=MUTED), padding=12).grid(row=4, column=0, sticky="w", padx=6, pady=(14, 6))
+        wrap_to(self.label(body, "ISSN（无法自动识别期刊时填写）", font=self.small_font, color=MUTED), padding=12).grid(row=3, column=0, sticky="w", padx=6, pady=(14, 6))
         entry = ctk.CTkEntry(body, textvariable=self.issn, height=40, width=200, corner_radius=10,
                 fg_color=WHITE, border_width=1, border_color=LINE, font=self.body_font)
-        entry.grid(row=5, column=0, sticky="w", padx=6)
+        entry.grid(row=4, column=0, sticky="w", padx=6)
         if self.worker and self.worker.is_alive():
             entry.configure(state="disabled")
-        self._browser_controls(body, win).grid(row=6, column=0, sticky="ew", padx=6, pady=(18, 10))
         self.secondary(win, "完成", win.destroy, width=100).grid(row=1, column=0, sticky="e", padx=28, pady=(4, 16))

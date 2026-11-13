@@ -7,7 +7,7 @@ from unittest.mock import patch
 from engine import Config, Downloader, PRESETS, library_path, paths_for, save_fulltext
 from library_inventory import scan_existing, xml_files, detect_journal
 from library_store import sidecar_path
-from smoke_test import xml, cached_index
+from smoke_test import offline_search_page, xml, cached_index
 
 
 def identified_xml(doi, journal=PRESETS[0]):
@@ -18,6 +18,9 @@ def identified_xml(doi, journal=PRESETS[0]):
 
 class InventoryTests(unittest.TestCase):
     def setUp(self):
+        search = patch('article_search.request_page', side_effect=offline_search_page)
+        search.start()
+        self.addCleanup(search.stop)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)

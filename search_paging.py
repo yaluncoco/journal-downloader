@@ -18,7 +18,7 @@ def collect_pages(runner, spec):
     from article_search import request_page, cache_path, PAGE_SIZE, MAX_RESULTS
     from engine import ActionRequired, load_json, save_json, timestamp
     checkpoint = cache_path(runner.state, spec).with_suffix('.partial.json')
-    saved = {} if runner.config.refresh else load_json(checkpoint, {})
+    saved = load_json(checkpoint, {})
     valid = (isinstance(saved, dict) and saved.get('spec') == spec and saved.get('complete') is False
              and type(saved.get('reported_total')) is int and 0 <= saved['reported_total'] <= MAX_RESULTS
              and isinstance(saved.get('raw_records'), list) and len(saved['raw_records']) <= MAX_SWEEPS * MAX_RESULTS
@@ -30,7 +30,8 @@ def collect_pages(runner, spec):
     if records:
         runner.log(f'读取未完成检索进度：已有 {len(records)} 条，继续补查；已下载文件仍按完整性校验跳过。')
     requested_sort = spec['body']['display']['sortBy']
-    sorts = (requested_sort, 'date' if requested_sort == 'relevance' else 'relevance', requested_sort)
+    catalog = 'issn' in spec['body']
+    sorts = (requested_sort,) * MAX_SWEEPS if catalog else (requested_sort, 'date' if requested_sort == 'relevance' else 'relevance', requested_sort)
 
     def persist():
         save_json(checkpoint, {'spec': spec, 'complete': False, 'updated_at': timestamp(),
@@ -38,7 +39,8 @@ def collect_pages(runner, spec):
 
     for sweep, sort in enumerate(sorts):
         if sweep:
-            runner.log(f'自动补查 {sweep}/{MAX_SWEEPS-1}：保持关键词、期刊与年份，改用'
+            runner.log(f'自动补查 {sweep}/{MAX_SWEEPS-1}：重新读取官方目录，合并缺项。' if catalog else
+                       f'自动补查 {sweep}/{MAX_SWEEPS-1}：保持关键词、期刊与年份，改用'
                        f'{"相关度" if sort == "relevance" else "发表日期"}顺序取回缺项；补回记录追加到列表末尾。')
         before, offset, pages = len(records), 0, 0
         pass_records, pass_totals, page_signatures = {}, set(), set()

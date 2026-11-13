@@ -8,11 +8,14 @@ from unittest.mock import Mock, patch
 from engine import ActionRequired, Cancelled, Config, Control, Downloader, PRESETS, load_json
 from pdf_browser import BrowserFailure, BrowserRenderer, PROBE_DOI, render_pdf
 from test_pipeline import sample_pdf
-from smoke_test import cached_index
+from smoke_test import offline_search_page, cached_index
 
 
 class BrowserTests(unittest.TestCase):
     def setUp(self):
+        search = patch('article_search.request_page', side_effect=offline_search_page)
+        search.start()
+        self.addCleanup(search.stop)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)

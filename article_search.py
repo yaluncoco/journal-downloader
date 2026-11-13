@@ -6,6 +6,7 @@ import html
 import json
 import re
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -13,16 +14,13 @@ import uuid
 
 from article_filter import phrases
 
-SCOPES = {"全文 · ScienceDirect": "fulltext", "题名 · ScienceDirect": "title", "本地题名筛选": "local"}
+SCOPES = {"全文 · ScienceDirect": "fulltext", "题名 · ScienceDirect": "title"}
 SORTS = {"相关度优先": "relevance", "最新发表优先": "date"}
 ENDPOINT = "https://api.elsevier.com/content/search/sciencedirect"
 PAGE_SIZE = 100
 MAX_RESULTS = 6000
 SCHEMA = 2
-
-
-def uses_api(scope, query):
-    return scope != "local" and bool(query.strip())
+PREVIEW_LIFETIME = 600
 
 
 def expression(query, mode):
@@ -63,13 +61,7 @@ def expression(query, mode):
 def validate_search(query, mode, scope, sort):
     if scope not in SCOPES.values() or sort not in SORTS.values():
         raise ValueError("检索范围或排序无效。")
-    if scope == "local":
-        if mode == "native":
-            raise ValueError("本地题名筛选请选择「任一词组」或「全部词组」；官网语法需使用 ScienceDirect 检索。")
-        from article_filter import filter_records
-        filter_records([], query, mode)
-    else:
-        expression(query, mode)
+    expression(query, mode)
 
 
 def search_spec(journal, start, end, query, mode, scope, sort):
@@ -81,6 +73,13 @@ def search_spec(journal, start, end, query, mode, scope, sort):
     value = expression(query, mode)
     if value:
         body["title" if scope == "title" else "qs"] = value
+    else:
+        # Search V2 requires qs/authors/title, even with pub/date supplied.
+        # Use the publisher's Article Metadata API for an unfiltered journal.
+        body.pop("pub")
+        body["issn"] = journal.issn
+        body["display"]["sortBy"] = "date"
+        scope = "catalog"
     return {"schema": SCHEMA, "issn": journal.issn, "scope": scope, "body": body}
 
 
@@ -108,6 +107,7 @@ def cached_search(state, spec):
 def website_url(journal, start, end, query, mode, scope, sort):
     params = search_spec(journal, start, end, query, mode, scope, sort)["body"].copy()
     params.pop("display")
+    params.pop("issn", None)
     # The website rejects quoted publication titles; its ISSN field provides
     # the exact journal restriction that PUT's quoted pub expression provides.
     params["pub"] = journal.name
@@ -120,11 +120,15 @@ def request_page(runner, body):
     from engine import AGENT, ActionRequired, NETWORK_ERRORS, retry_seconds
     for attempt in range(4):
         runner.control.checkpoint()
-        request = urllib.request.Request(ENDPOINT, method="PUT",
-            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers={"X-ELS-APIKey": runner.key, "Content-Type": "application/json",
-                     "Accept": "application/json", "Accept-Encoding": "identity",
-                     "User-Agent": AGENT, "X-ELS-ReqId": str(uuid.uuid4())})
+        headers = {"X-ELS-APIKey": runner.key, "Content-Type": "application/json",
+                   "Accept": "application/json", "Accept-Encoding": "identity",
+                   "User-Agent": AGENT, "X-ELS-ReqId": str(uuid.uuid4())}
+        if "issn" in body:
+            from journal_articles import catalog_request
+            request = catalog_request(body, headers)
+        else:
+            request = urllib.request.Request(ENDPOINT, method="PUT",
+                data=json.dumps(body, ensure_ascii=False).encode("utf-8"), headers=headers)
         delay = 0
         try:
             with runner.opener.open(request, timeout=runner.config.timeout) as response:
@@ -135,6 +139,9 @@ def request_page(runner, body):
                 data = json.loads(payload)
             except ValueError:
                 raise ActionRequired("ScienceDirect 搜索未返回有效 JSON，请检查网络后重试。") from None
+            if "issn" in body:
+                from journal_articles import catalog_response
+                data = catalog_response(data, body)
             if not isinstance(data, dict) or type(data.get("resultsFound")) is not int or not isinstance(data.get("results"), list):
                 raise ActionRequired("ScienceDirect 搜索响应结构不完整；未将其当作零结果。")
             if data["resultsFound"] < 0:
@@ -145,13 +152,13 @@ def request_page(runner, body):
             error.close()
             if code in (401, 403):
                 raise ActionRequired(f"ScienceDirect 搜索 HTTP {code}：当前 Key 或机构出口未获搜索接口授权。"
-                    "全文下载权限不代表搜索权限；请检查校园网/VPN及 Key 授权，或手动选择「本地题名筛选」。"
+                    "全文下载权限不代表列表接口权限；请检查校园网/VPN及 Key 授权。"
                     "也可用「官网」核对检索条件；不会自动缩小为题名检索。") from None
             if code == 400:
                 raise ActionRequired("ScienceDirect 拒绝此检索式（HTTP 400）。请检查大写 AND / OR / NOT、"
                     "英文双引号和括号，或改用任一/全部词组。") from None
             if code == 429 and headers.get("X-RateLimit-Remaining") == "0":
-                raise ActionRequired("ScienceDirect 搜索配额已用完；请在配额恢复后重试，已完成的查询缓存可继续复用。") from None
+                raise ActionRequired("ScienceDirect 列表配额已用完；请在配额恢复后重试，已有文件与未完成查询进度已保留。") from None
             if code not in (408, 429, 500, 502, 503, 504):
                 raise ActionRequired(f"ScienceDirect 搜索返回 HTTP {code}，请检查网络或接口状态。") from None
             delay = retry_seconds(headers.get("Retry-After")) or (60 if code == 429 else 0)
@@ -168,13 +175,19 @@ def collect_search(runner):
     cfg, journal = runner.config, runner.journal
     spec = search_spec(journal, cfg.start_year, cfg.end_year, cfg.title_filter,
                        cfg.filter_mode, cfg.search_scope, cfg.search_sort)
-    cached = cached_search(runner.state, spec)
-    if cached and not cfg.refresh:
-        runner.log("检索范围：" + scope_description(cfg.search_scope))
-        runner.log(f"复用 ScienceDirect 检索结果：{len(cached['records'])} 条（{cached['created_at']}）。更新论文列表可重新检索。")
-        return cached
-    runner.log("ScienceDirect API 检索：" + ("论文题名" if cfg.search_scope == "title" else "全部内容（不含参考文献）") +
-               "；按" + ("相关度" if cfg.search_sort == "relevance" else "最新发表日期") + "排序。")
+    snapshot = runner.search_snapshot
+    runner.search_snapshot = None  # One handoff from preview to download, never a permanent cache.
+    if (snapshot and snapshot.get('state') == str(runner.state)
+            and 0 <= time.monotonic() - snapshot.get('checked_at', 0) < PREVIEW_LIFETIME
+            and snapshot['result'].get('spec') == spec and snapshot['result'].get('complete') is True):
+        runner.log(f"使用刚刚预览的官方列表：{len(snapshot['result']['records'])} 条；继续校验已有文件。")
+        return snapshot['result']
+    runner.log("自动更新期刊论文列表：直接查询 Elsevier 官方接口。")
+    if "issn" in spec['body']:
+        runner.log("关键词留空：按 ISSN 和发表年份获取期刊目录，最新发表优先。")
+    else:
+        runner.log("ScienceDirect API 检索：" + ("论文题名" if cfg.search_scope == "title" else "全部内容（不含参考文献）") +
+                   "；按" + ("相关度" if cfg.search_sort == "relevance" else "最新发表日期") + "排序。")
     runner.log("检索式：" + (spec["body"].get("qs", spec["body"].get("title")) or "留空（所选期刊与年份）"))
     allowed = {normalize_title(journal.name)}
     from journal_catalog import lookup
@@ -182,14 +195,12 @@ def collect_search(runner):
     if item:
         allowed.update(normalize_title(alias) for alias in item.get("aliases", []))
     from search_paging import collect_pages
-    if cfg.refresh:
-        cache_path(runner.state, spec).unlink(missing_ok=True)
     paging = collect_pages(runner, spec)
     rows, dropped = [], Counter()
     for entry in paging['raw_records']:
         doi = str(entry.get("doi") or "").strip().lower()
         source = str(entry.get("sourceTitle") or "")
-        if normalize_title(source) not in allowed:
+        if normalize_title(source) not in allowed or (entry.get('issn') and entry['issn'] != journal.issn.replace('-', '')):
             dropped["其他期刊或期刊不明"] += 1
             continue
         if not re.fullmatch(r"10\.\d{4,9}/\S+", doi):
@@ -220,7 +231,7 @@ def collect_search(runner):
     if not result['complete']:
         gap = f"尚差 {result['missing']} 条" if result['missing'] else '翻页期间数量发生变化，覆盖范围仍待复核'
         result['notice'] = (f"检索列表尚未完整：接口报告 {result['results_found']} 条，去重已获取 {result['unique_received']} 条，{gap}。"
-                            f"本次可先处理其中已确认匹配的 {len(unique)} 篇；再次开始会自动补查，更新论文列表可从头检索。")
+                            f"本次可先处理其中已确认匹配的 {len(unique)} 篇；再次开始会自动补查，无需手动刷新。")
     save_json(cache_path(runner.state, spec), result)
     if result['complete']:
         cache_path(runner.state, spec).with_suffix('.partial.json').unlink(missing_ok=True)
@@ -232,5 +243,4 @@ def collect_search(runner):
 
 
 def scope_description(scope):
-    return {"fulltext": "全文（不含参考文献）", "title": "仅论文标题，不检索摘要或正文",
-            "local": "仅本地候选题名，不检索摘要或正文"}[scope]
+    return {"fulltext": "全文（不含参考文献）", "title": "仅论文标题，不检索摘要或正文"}[scope]
