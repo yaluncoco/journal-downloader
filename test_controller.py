@@ -103,6 +103,30 @@ class ControllerTests(unittest.TestCase):
                     app._poll()
                 self.assertEqual(app.metrics['total'].get(), expected)
 
+    def test_incomplete_search_remains_visible_after_download_completion(self):
+        app = self.quiet_app()
+        app.active_job = 'xml'
+        note = '检索列表尚未完整：接口报告 2 条，去重已获取 1 条，尚差 1 条。'
+        app.events.put({'kind': 'search_notice', 'text': note})
+        app.events.put({'kind': 'counts', 'total': 1, 'saved': 1, 'reused': 0,
+                        'pending': 0, 'stage': 'finished'})
+        app.events.put({'kind': 'done', 'outcome': 'complete', 'text': 'Done'})
+        app._poll()
+        self.assertEqual(app.status.get(), '已结束 · 检索列表待补齐')
+        self.assertIn(note, app.detail.get())
+        app._show_search_results({'records': [], 'candidate_total': 2, 'scope': 'fulltext',
+            'query': 'tree', 'journal': PRESETS[0].name, 'years': [2024, 2024], 'search_notice': note})
+        def text_tree(widget):
+            values = []
+            try:
+                values.append(str(widget.cget('text')))
+            except Exception:
+                pass
+            for child in widget.winfo_children():
+                values.extend(text_tree(child))
+            return values
+        self.assertTrue(any(note in value for value in text_tree(app.search_results_window)))
+
     def test_pdf_footer_reports_complete_partial_empty_and_stopped_truthfully(self):
         app = self.quiet_app()
         app.active_job = "pdf"

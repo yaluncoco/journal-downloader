@@ -212,6 +212,7 @@ class Controller(LibraryPreview):
         if getattr(self, "catalog_window", None) and self.catalog_window.winfo_exists():
             self.catalog_window.destroy()
         self.active_job = "search" if preview else "xml"
+        self.search_notice = ''
         self.pipeline_pdf = not preview and cfg.output_mode != "xml"
         self.saved_caption.set("完整输出" if self.pipeline_pdf else "已保存全文")
         if self.pipeline_pdf:
@@ -423,6 +424,8 @@ class Controller(LibraryPreview):
             elif kind == "search_results":
                 if not self.closing:
                     self._show_search_results(event)
+            elif kind == 'search_notice':
+                self.search_notice = event['text']
             elif kind == "library_scan_progress":
                 if (event["generation"] == self.scan_generation and not self.closing
                         and not (self.worker and self.worker.is_alive())):
@@ -504,6 +507,10 @@ class Controller(LibraryPreview):
                         text = "所选列表中的条目均已保存并通过校验。"
                 else:
                     self.status.set({"stopped": "已停止", "action_required": "需要处理", "error": "遇到错误"}[outcome])
+                if self.active_job in ('search', 'xml') and getattr(self, 'search_notice', ''):
+                    text += '\n' + self.search_notice
+                    if outcome == 'complete':
+                        self.status.set('已结束 · 检索列表待补齐')
                 if self.active_job == "pdf":
                     self.pdf_progress.stop()
                     if outcome == "complete" and self.stages == "pdf_finished" and self.metrics["total"].get() != "0":

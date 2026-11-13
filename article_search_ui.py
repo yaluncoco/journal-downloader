@@ -99,6 +99,8 @@ class ArticleSearchUI:
             hint += "\n当前只查题名。TLS 等术语可能出现在正文，可切换全文重新预览。"
         else:
             hint += "\n仅预览列表，尚未下载全文；缩写不会自动扩展为全称。"
+        if result.get('search_notice'):
+            hint += '\n' + result['search_notice']
         wrap_to(self.label(win, hint, font=self.small_font, color=MUTED, justify="left"), padding=40).grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 10))
         box = ctk.CTkTextbox(win, font=self.body_font, wrap="word", fg_color=WHITE, text_color=INK,
                              scrollbar_button_color="#D1DDE5", scrollbar_button_hover_color="#9BAEBE")

@@ -30,7 +30,7 @@ from xml_utils import atomic_bytes, inspect_xml, plain_text, save_fulltext
 from library_store import state_dir, sidecar_path, existing_sidecar, migrate_library
 from article_search import uses_api
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 AGENT = f"JournalXMLDownloader/{VERSION} (personal research)"
 FULLTEXT = {"fulltext_structured", "fulltext_rawtext"}
 NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)
@@ -417,6 +417,7 @@ class Downloader:
         self.xml_saved = {}
         self.output_processor = None
         self.candidate_total = 0
+        self.search_info = {}
         self.failures = {}
         self.latest = {}
         self.new_count = 0
@@ -595,7 +596,10 @@ class Downloader:
                    "max_downloads": self.config.max_downloads, "download_target": self.download_target,
                    "failed_or_review": len(self.failures), "source": "ScienceDirect Search V2; Elsevier XML" if uses_api(self.config.search_scope, self.config.title_filter) else "Crossref candidate list; Elsevier XML"}
         summary.update(output_mode=self.config.output_mode, candidate_total=self.candidate_total,
-                       excluded=max(0, self.candidate_total - len(self.records)),
+                       excluded=sum(self.search_info.get('excluded', {}).values()) if self.search_info else max(0, self.candidate_total - len(self.records)),
+                       search_complete=self.search_info.get('complete', True),
+                       search_missing=self.search_info.get('missing', 0),
+                       search_notice=self.search_info.get('notice', ''),
                        title_filter=self.config.title_filter, filter_mode=self.config.filter_mode,
                        search_scope=self.config.search_scope, search_sort=self.config.search_sort)
         save_json(self.state / "download_summary.json", summary)
@@ -617,7 +621,10 @@ class Downloader:
             result = collect_search(self)
             self.records = result["records"]
             self.candidate_total = result["results_found"]
+            self.search_info = result
+            self.emit(kind='search_notice', text=result.get('notice', ''))
         else:
+            self.search_info = {}
             candidates = self.collect()
             self.candidate_total = len(candidates)
             save_lines(self.state / "manifest.jsonl", candidates)
@@ -632,6 +639,8 @@ class Downloader:
             migrate_library(self.base)
             self.select_records()
             return {"records": self.records, "candidate_total": self.candidate_total,
+                    "search_complete": self.search_info.get('complete', True),
+                    "search_notice": self.search_info.get('notice', ''),
                     "scope": self.config.search_scope, "query": self.config.title_filter,
                     "journal": self.journal.name, "years": [self.config.start_year, self.config.end_year]}
 

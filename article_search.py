@@ -18,7 +18,7 @@ SORTS = {"相关度优先": "relevance", "最新发表优先": "date"}
 ENDPOINT = "https://api.elsevier.com/content/search/sciencedirect"
 PAGE_SIZE = 100
 MAX_RESULTS = 6000
-SCHEMA = 1
+SCHEMA = 2
 
 
 def uses_api(scope, query):
@@ -96,6 +96,7 @@ def cached_search(state, spec):
         return None
     rows = cached.get("records")
     if (type(cached.get("results_found")) is not int or cached["results_found"] < 0 or not isinstance(cached.get("created_at"), str)
+            or cached.get('unique_received') != cached['results_found'] or cached.get('missing') != 0
             or not isinstance(rows, list) or not all(isinstance(row, dict) and isinstance(row.get("doi"), str)
             and isinstance(row.get("year"), int) and isinstance(row.get("date"), str)
             and isinstance(row.get("title"), str) for row in rows)
@@ -163,7 +164,7 @@ def request_page(runner, body):
 
 
 def collect_search(runner):
-    from engine import ActionRequired, normalize_title, save_json, timestamp
+    from engine import normalize_title, save_json, timestamp
     cfg, journal = runner.config, runner.journal
     spec = search_spec(journal, cfg.start_year, cfg.end_year, cfg.title_filter,
                        cfg.filter_mode, cfg.search_scope, cfg.search_sort)
@@ -180,54 +181,32 @@ def collect_search(runner):
     item = lookup(journal.slug, journal.name)
     if item:
         allowed.update(normalize_title(alias) for alias in item.get("aliases", []))
-    rows, seen, dropped = [], set(), Counter()
-    offset, total = 0, None
-    while True:
-        runner.control.checkpoint()
-        body = {**spec["body"], "display": {**spec["body"]["display"], "offset": offset, "show": PAGE_SIZE}}
-        data = request_page(runner, body)
-        found, items = data["resultsFound"], data["results"]
-        if total is not None and found != total:
-            raise ActionRequired("检索结果在翻页期间发生变化，请更新论文列表后重试；未保存不完整查询。")
-        total = found
-        if total > MAX_RESULTS:
-            raise ActionRequired(f"此检索命中 {total} 条，超过本软件单次完整获取上限 {MAX_RESULTS} 条。"
-                                 "请缩小年份或增加关键词后重试；未截断结果，也未开始下载。")
-        if len(items) > PAGE_SIZE or (not items and offset < total) or offset + len(items) > total:
-            raise ActionRequired("ScienceDirect 分页结果不完整，请稍后重新检索；未保存不完整查询。")
-        for entry in items:
-            if not isinstance(entry, dict):
-                raise ActionRequired("ScienceDirect 返回无效记录，已停止检索。")
-            identity = str(entry.get("pii") or entry.get("doi") or entry.get("uri") or "")
-            if identity and identity in seen:
-                raise ActionRequired("ScienceDirect 分页出现重复记录，请更新论文列表后重试。")
-            if identity:
-                seen.add(identity)
-            doi = str(entry.get("doi") or "").strip().lower()
-            source = str(entry.get("sourceTitle") or "")
-            if normalize_title(source) not in allowed:
-                dropped["其他期刊或期刊不明"] += 1
-                continue
-            if not re.fullmatch(r"10\.\d{4,9}/\S+", doi):
-                dropped["缺少有效 DOI"] += 1
-                continue
-            day = str(entry.get("publicationDate") or "")[:10]
-            try:
-                year = date.fromisoformat(day).year
-            except ValueError:
-                dropped["发表日期不明"] += 1
-                continue
-            if not cfg.start_year <= year <= cfg.end_year:
-                dropped["年份范围外"] += 1
-                continue
-            title = html.unescape(re.sub(r"<[^>]+>", "", str(entry.get("title") or "")))
-            rows.append({"doi": doi, "title": title, "date": day,
-                         "year": year, "pii": str(entry.get("pii") or ""), "journal": source})
-        offset += len(items)
-        runner.emit(kind="phase", text=f"ScienceDirect 检索 · 已获取 {offset}/{total} 条")
-        if offset >= total:
-            break
-        runner.control.wait(max(1, cfg.interval), "检索分页间隔")
+    from search_paging import collect_pages
+    if cfg.refresh:
+        cache_path(runner.state, spec).unlink(missing_ok=True)
+    paging = collect_pages(runner, spec)
+    rows, dropped = [], Counter()
+    for entry in paging['raw_records']:
+        doi = str(entry.get("doi") or "").strip().lower()
+        source = str(entry.get("sourceTitle") or "")
+        if normalize_title(source) not in allowed:
+            dropped["其他期刊或期刊不明"] += 1
+            continue
+        if not re.fullmatch(r"10\.\d{4,9}/\S+", doi):
+            dropped["缺少有效 DOI"] += 1
+            continue
+        day = str(entry.get("publicationDate") or "")[:10]
+        try:
+            year = date.fromisoformat(day).year
+        except ValueError:
+            dropped["发表日期不明"] += 1
+            continue
+        if not cfg.start_year <= year <= cfg.end_year:
+            dropped["年份范围外"] += 1
+            continue
+        title = html.unescape(re.sub(r"<[^>]+>", "", str(entry.get("title") or "")))
+        rows.append({"doi": doi, "title": title, "date": day,
+                     "year": year, "pii": str(entry.get("pii") or ""), "journal": source})
     unique, dois = [], set()
     for row in rows:
         if row["doi"] not in dois:
@@ -235,11 +214,20 @@ def collect_search(runner):
             dois.add(row["doi"])
     if len(unique) != len(rows):
         dropped["重复 DOI"] += len(rows) - len(unique)
-    result = {"complete": True, "spec": spec, "created_at": timestamp(), "results_found": total,
-              "excluded": dict(dropped), "records": unique}
+    result = {key: value for key, value in paging.items() if key != 'raw_records'}
+    result.update(spec=spec, created_at=timestamp(), excluded=dict(dropped), records=unique)
+    result['notice'] = ''
+    if not result['complete']:
+        gap = f"尚差 {result['missing']} 条" if result['missing'] else '翻页期间数量发生变化，覆盖范围仍待复核'
+        result['notice'] = (f"检索列表尚未完整：接口报告 {result['results_found']} 条，去重已获取 {result['unique_received']} 条，{gap}。"
+                            f"本次可先处理其中已确认匹配的 {len(unique)} 篇；再次开始会自动补查，更新论文列表可从头检索。")
     save_json(cache_path(runner.state, spec), result)
-    runner.log(f"ScienceDirect 命中 {total} 条，可处理 {len(unique)} 条。" +
+    if result['complete']:
+        cache_path(runner.state, spec).with_suffix('.partial.json').unlink(missing_ok=True)
+    runner.log(f"ScienceDirect 接口报告 {result['results_found']} 条，去重获取 {result['unique_received']} 条，可处理 {len(unique)} 条。" +
                ("排除：" + "；".join(f"{key} {value} 条" for key, value in dropped.items()) if dropped else ""))
+    if result['notice']:
+        runner.log(result['notice'])
     return result
 
 

@@ -4,6 +4,8 @@
 
 常用入口保留 **Remote Sensing of Environment（RSE）** 与 **ISPRS Journal of Photogrammetry and Remote Sensing**。点击「检索全部期刊」可按英文名称、关键词或 ISSN 搜索内置目录，也支持粘贴期刊地址。
 
+**v1.8.1** 修复 ScienceDirect 跨页重复导致检索停止：按 PII / DOI 自动去重，分页位置仍按接口原始返回条数推进。缺项时保持相同查询条件，有限次交替排序补查；保留首次出现顺序，补回条目追加在末尾。每页保存检索进度，仍有缺口时明确提示并允许先下载已确认匹配的论文，不把部分列表缓存成完整结果。2026-11-13 实测 Ecological Indicators、2026–2027 年、全文 `tree`，从第一轮 609/612 条自动补齐至 612/612 条，共 10 个分页请求。
+
 **v1.8.0** 排查 TLS 漏检与浏览器依赖：2026-11-11 实测 RSE、2020–2027 年、TLS，官网与 API 均为题名 1 篇、全文 113 篇。预览现在明确显示检索范围，题名模式可一键改为全文重新预览；官网入口使用未加引号的刊名和 ISSN 精确限定。默认 PDF 流程先校验官方原版，不可用时通过内置 ReportLab / MathML 排版生成单栏阅读版，不启动浏览器。只有手动选择浏览器排版才调用 Edge / Chrome。官方 PDF 必须与 XML 中的全文页数一致；HTTP 200 的第一页预览不会当作完整全文。
 
 **v1.7.0** 接入 ScienceDirect Search V2：论文关键词可检索全部内容（不含参考文献）或仅题名，支持大写 AND / OR / NOT、双引号词组、括号组合及相关度 / 最新发表排序。提供分页预览和官网核对入口；相同条件复用缓存，查询变更不会覆盖完整文库索引。旧版已保存的题名筛选仍按原方式执行，可手动切换到 API 检索。
@@ -104,12 +106,12 @@ python -m venv .build-env
 .\build.ps1 -ISCC "C:\Program Files\Inno Setup 7\ISCC.exe"
 ```
 
-安装器编译需安装官方 Inno Setup 7。产物为 `release/v1.8.0/JournalDownloader-Setup.exe`；应用目录为 `release/v1.8.0/JournalDownloader/`。XML 下载引擎使用 Python 标准库；界面使用 CustomTkinter，图片校验使用 Pillow，PDF 校验使用 pypdf，使用 PyInstaller 打包。内置排版的依赖及字体随安装包分发；可选的浏览器不随程序分发。
+安装器编译需安装官方 Inno Setup 7。产物为 `release/v1.8.1/JournalDownloader-Setup.exe`；应用目录为 `release/v1.8.1/JournalDownloader/`。XML 下载引擎使用 Python 标准库；界面使用 CustomTkinter，图片校验使用 Pillow，PDF 校验使用 pypdf，使用 PyInstaller 打包。内置排版的依赖及字体随安装包分发；可选的浏览器不随程序分发。
 
 打包后离线自检：
 
 ```powershell
-.\release\v1.8.0\JournalDownloader\JournalDownloader.exe --self-test "$env:TEMP\journal-downloader-test.json"
+.\release\v1.8.1\JournalDownloader\JournalDownloader.exe --self-test "$env:TEMP\journal-downloader-test.json"
 ```
 
 加入 `--online` 可额外验证两个期刊的在线元数据查询，不需要真实 API Key。
@@ -118,7 +120,7 @@ python -m venv .build-env
 无网络批量合成（要求图片已缓存；API Key 不通过命令行传递）：
 
 ```powershell
-.\release\v1.8.0\JournalDownloader\JournalDownloader.exe --pdf-export "D:\文库\fulltext_xml" "D:\文库\fulltext_pdf"
+.\release\v1.8.1\JournalDownloader\JournalDownloader.exe --pdf-export "D:\文库\fulltext_xml" "D:\文库\fulltext_pdf"
 ```
 
 结果保存在本机应用数据中的 `offline_export_result.json`，输出目录只放 PDF；默认使用内置单栏排版。首次获取图片请使用界面输入 Key。

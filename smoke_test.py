@@ -104,6 +104,24 @@ def _run(output, online=False, pdf=False):
         assert safe_url("https://github.com/yaluncoco/journal-downloader")
         results["update_module_loaded"] = True
         with tempfile.TemporaryDirectory(prefix="journal-downloader-test-") as tmp:
+            from unittest.mock import patch
+            from article_search import collect_search, cached_search
+            searcher = Downloader(Config('OFFLINE_TEST_CREDENTIAL', PRESETS[0].url, 2024, 2024,
+                Path(tmp) / 'search', title_filter='tree', filter_mode='native', search_scope='fulltext'))
+            searcher.initialize_library()
+            searcher.control.wait = lambda *args: searcher.control.checkpoint()
+            hit = {'doi': '10.1016/j.demo.2024.search1', 'pii': 'S0000000000000001',
+                   'title': 'Forest example', 'sourceTitle': PRESETS[0].name, 'publicationDate': '2024-03-01'}
+            duplicate_page = {'resultsFound': 2, 'results': [hit, hit]}
+            with patch('article_search.request_page', return_value=duplicate_page) as request:
+                partial = collect_search(searcher)
+                assert not partial['complete'] and partial['missing'] == 1 and request.call_count == 2
+                assert cached_search(searcher.state, partial['spec']) is None
+            other = {**hit, 'doi': '10.1016/j.demo.2024.search2', 'pii': 'S0000000000000002'}
+            with patch('article_search.request_page', return_value={'resultsFound': 2, 'results': [other]}) as request:
+                recovered = collect_search(searcher)
+                assert recovered['complete'] and len(recovered['records']) == 2 and request.call_count == 1
+            results['search_duplicate_recovery_and_partial_resume'] = True
             base = Path(tmp) / PRESETS[0].issn
             row = {"doi": "10.1016/j.demo.2024.123456", "year": 2024, "title": "Offline test", "date": "2024-01"}
             cached_index(base, [row])

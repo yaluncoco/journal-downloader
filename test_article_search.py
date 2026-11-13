@@ -8,7 +8,7 @@ import urllib.error
 import urllib.parse
 
 from article_search import (ENDPOINT, collect_search, request_page, search_spec,
-                            cache_path, expression, validate_search, website_url)
+                            cache_path, cached_search, expression, validate_search, website_url)
 from engine import Config, Downloader, PRESETS, ActionRequired, Cancelled, load_json
 from smoke_test import cached_index, xml
 from test_engine import Opener, Response
@@ -121,15 +121,124 @@ class ArticleSearchTests(unittest.TestCase):
         self.assertEqual(sum(result['excluded'].values()), 4)
         self.assertEqual(result['results_found'], 5)
 
-    def test_over_limit_incomplete_and_changing_results_never_cache_success(self):
-        cases = [[response([], 6001)], [response([], 1)],
-                 [response([entry()], 2), response([entry(2)], 3)],
-                 [response([entry()], 2), response([entry()], 2)]]
+    def test_over_limit_and_empty_incomplete_results_never_cache_success(self):
+        cases = [[response([], 6001)], [response([], 1), response([], 1)]]
         for responses in cases:
             with self.subTest(responses=len(responses)), self.assertRaises(ActionRequired):
                 self.runner.opener = Opener(responses)
                 collect_search(self.runner)
-            self.assertFalse(list(self.runner.state.glob('searches/*.json')))
+            spec = search_spec(PRESETS[0], 2024, 2024, self.cfg.title_filter, 'native', 'fulltext', 'relevance')
+            self.assertIsNone(cached_search(self.runner.state, spec))
+
+    def test_duplicate_page_is_deduplicated_and_missing_hit_recovered(self):
+        items = [entry(i) for i in range(1, 104)]
+        self.runner.opener = Opener([response(items[:100], 103),
+            response([items[99], items[100], items[101]], 103), response([items[102]] + items[:99], 103)])
+        result = collect_search(self.runner)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['unique_received'], 103)
+        self.assertEqual(result['duplicate_occurrences'], 100)
+        self.assertEqual([r['doi'] for r in result['records']], [r['doi'] for r in items])
+        requests = [json.loads(r.data) for r in self.runner.opener.requests]
+        self.assertEqual([(r['display']['offset'], r['display']['sortBy']) for r in requests],
+                         [(0, 'relevance'), (100, 'relevance'), (0, 'date')])
+        self.assertTrue(all(r['qs'] == self.cfg.title_filter and r['date'] == '2024-2024' for r in requests))
+        self.assertFalse(list(self.runner.state.glob('searches/*.partial.json')))
+
+    def test_persistent_overlap_keeps_partial_results_and_next_run_fills_gap(self):
+        items = [entry(i) for i in range(1, 104)]
+        def pages():
+            return [response(items[:100], 103), response([items[99], items[100], items[101]], 103)]
+        self.runner.opener = Opener(pages() + pages())
+        result = collect_search(self.runner)
+        self.assertFalse(result['complete'])
+        self.assertEqual((len(result['records']), result['missing']), (102, 1))
+        self.assertIn('尚差 1 条', result['notice'])
+        self.assertIsNone(cached_search(self.runner.state, result['spec']))
+        self.assertEqual(len(self.runner.opener.requests), 4)
+        self.runner.opener = Opener([response([items[102]] + items[:99], 103)])
+        repaired = collect_search(self.runner)
+        self.assertTrue(repaired['complete'])
+        self.assertEqual(len(repaired['records']), 103)
+        self.assertEqual(collect_search(self.runner), repaired)  # Complete cache needs no request.
+        self.assertEqual(len(self.runner.opener.requests), 1)
+
+    def test_partial_query_can_download_and_resume_without_duplicate_fulltexts(self):
+        self.cfg.max_downloads = 1
+        def stuck():
+            return [response([entry(1), entry(1)], 2), response([entry(1), entry(1)], 2)]
+        self.runner.opener = Opener(stuck())
+        self.runner.fetch = Mock(return_value=(xml(entry(1)['doi']), {'http': 200}))
+        self.runner.run()
+        summary = load_json(self.runner.state / 'download_summary.json')
+        self.assertFalse(summary['search_complete'])
+        self.assertEqual((summary['saved'], summary['search_missing'], summary['excluded']), (1, 1, 0))
+        again = Downloader(self.cfg)
+        again.control.wait = Mock()
+        again.opener = Opener([response([entry(2)], 2)])
+        again.fetch = Mock(return_value=(xml(entry(2)['doi']), {'http': 200}))
+        again.run()
+        self.assertEqual((again.reused, again.new_count), (1, 1))
+        again.fetch.assert_called_once_with(entry(2)['doi'])
+
+    def test_changing_total_recovers_with_a_complete_stable_sweep(self):
+        self.runner.opener = Opener([response([entry(1)], 2), response([entry(2), entry(3)], 3),
+                                    response([entry(3), entry(2), entry(1)], 3)])
+        result = collect_search(self.runner)
+        self.assertTrue(result['complete'])
+        self.assertTrue(result['total_changed'])
+        self.assertEqual(len(result['records']), 3)
+        self.assertEqual([row['doi'] for row in result['records']], [entry(i)['doi'] for i in (1, 2, 3)])
+
+    def test_shrinking_snapshot_discards_old_partial_hits_only_when_new_sweep_complete(self):
+        self.runner.opener = Opener([response([entry(1), entry(1)], 2), response([entry(1), entry(1)], 2)])
+        self.assertFalse(collect_search(self.runner)['complete'])
+        self.runner.opener = Opener([response([entry(2)], 1)])
+        result = collect_search(self.runner)
+        self.assertTrue(result['complete'])
+        self.assertEqual([row['doi'] for row in result['records']], [entry(2)['doi']])
+
+    def test_repeated_whole_page_is_bounded_even_when_offset_is_ignored(self):
+        page = [entry(i) for i in range(100)]
+        self.runner.opener = Opener([response(page, 6000) for _ in range(4)])
+        result = collect_search(self.runner)
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['missing'], 5900)
+        self.assertEqual(len(self.runner.opener.requests), 4)
+
+    def test_duplicate_doi_across_pii_is_counted_without_double_download(self):
+        self.runner.opener = Opener([response([entry(1), entry(2, doi=entry(1)['doi'].upper())])])
+        result = collect_search(self.runner)
+        self.assertTrue(result['complete'])
+        self.assertEqual(len(result['records']), 1)
+        self.assertEqual(result['excluded']['重复 DOI'], 1)
+
+    def test_cancel_preserves_page_progress_and_query_isolation(self):
+        items = [entry(i) for i in range(1, 102)]
+        self.runner.opener = Opener([response(items[:100], 101)])
+        self.runner.control.wait = Mock(side_effect=Cancelled)
+        with self.assertRaises(Cancelled):
+            collect_search(self.runner)
+        self.assertEqual(len(list(self.runner.state.glob('searches/*.partial.json'))), 1)
+        self.runner.control.wait = Mock()
+        self.cfg.title_filter = 'different query'
+        self.runner.opener = Opener([response([entry(999)])])
+        self.assertEqual(len(collect_search(self.runner)['records']), 1)
+
+    def test_refresh_does_not_reuse_partial_checkpoint(self):
+        self.runner.opener = Opener([response([entry(1), entry(1)], 2), response([entry(1), entry(1)], 2)])
+        self.assertFalse(collect_search(self.runner)['complete'])
+        self.cfg.refresh = True
+        self.runner.opener = Opener([response([entry(2)])])
+        result = collect_search(self.runner)
+        self.assertEqual([r['doi'] for r in result['records']], [entry(2)['doi']])
+
+    def test_recovery_authentication_failure_still_stops_and_keeps_checkpoint(self):
+        self.runner.opener = Opener([response([entry(1), entry(1)], 2),
+            urllib.error.HTTPError(ENDPOINT, 403, 'test', {}, None)])
+        with self.assertRaises(ActionRequired):
+            collect_search(self.runner)
+        self.assertEqual(len(list(self.runner.state.glob('searches/*.partial.json'))), 1)
 
     def test_permissions_syntax_and_exhausted_quota_do_not_fallback(self):
         for code in (400, 401, 403, 429):
